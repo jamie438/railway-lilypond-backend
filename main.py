@@ -5,7 +5,7 @@ import subprocess
 import psycopg2.extras
 from flask_socketio import SocketIO, emit, join_room
 from pathlib import Path
-from supabase import create_client
+from supabase import create_client, Client
 import os
 from PIL import Image, ImageChops, ImageOps
 
@@ -13,9 +13,10 @@ from PIL import Image, ImageChops, ImageOps
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")
-supabase = create_client(supabase_url, supabase_key)
+SUPABASE_URL = "https://saxhvimwcbkkoxalhrqx.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGh2aW13Y2Jra294YWxocnF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ0OTA2MjYsImV4cCI6MjA2MDA2NjYyNn0.ocSTlhrSOq7ISwiPGOdMW7iksoxL5bO154kBGUDVQKY"
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "audiofiles"
 
 def get_db_connection():
