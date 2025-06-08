@@ -176,10 +176,10 @@ def try_again_process_scale(name, notes):
     total_width = note_count * note_width_mm + padding_mm
     dpi = 600
 
-    desktop = Path.home() / "Desktop"
-    output_png_path = desktop / f"{name}.png"
-    temp_png_path = desktop / "temp_output.png"
-    cropped_png_path = desktop / "cropped_output.png"
+    tmp = Path("/tmp")
+    output_png_path = tmp / f"{name}.png"
+    temp_png_path = tmp / "temp_output.png"
+    cropped_png_path = tmp / "cropped_output.png"
 
     ly_code = f"""
     \\version "2.24.1"
