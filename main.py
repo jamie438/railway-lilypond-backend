@@ -20,7 +20,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "audiofiles"
 
 def get_db_connection():
-    conn = psycopg2.connect(os.getenv("postgresql://postgres.saxhvimwcbkkoxalhrqx:Grandma%40Lachen1234@aws-0-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require"))
+    conn = psycopg2.connect("postgresql://postgres.saxhvimwcbkkoxalhrqx:Grandma%40Lachen1234@aws-0-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require")
     conn.autocommit = True
     return conn
 
