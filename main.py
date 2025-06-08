@@ -182,7 +182,8 @@ def try_again_process_scale(name, notes):
     cropped_png_path = desktop / "cropped_output.png"
 
     ly_code = f"""
-    \\version "2.24.2"
+    \\version "2.24.1"
+
     #(set-global-staff-size 36)
     \\paper {{
       indent = 0
