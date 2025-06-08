@@ -211,6 +211,7 @@ def try_again_process_scale(name, notes):
       }}
     }}
     """
+    ly_code = ly_code.replace('\\version "2.24.2"', '\\version "2.24.1"')
 
     ly_file = Path("/tmp/notation.ly")
     pdf_file = ly_file.with_suffix(".pdf")
