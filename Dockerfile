@@ -5,9 +5,12 @@ RUN apt-get update && apt-get install -y \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
+# 👉 Hier wird die PDF-Sicherheitsrichtlinie angepasst:
+RUN sed -i 's/<policy domain="coder" rights="none" pattern="PDF" \/>/<policy domain="coder" rights="read|write" pattern="PDF" \/>/' /etc/ImageMagick-6/policy.xml
+
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 👉 Wichtig: Hier auf Port 8080 wechseln
+# Railway erwartet Port 8080
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "main:app"]
