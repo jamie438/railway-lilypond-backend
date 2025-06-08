@@ -241,7 +241,7 @@ def try_again_process_scale(name, notes):
 
     print(f"✅ PNG fertig: {output_png_path}")
 
-    upload_path = f"media/exercises/fight/{name}.png"
+    upload_path = f"media/exercises/{name}.png"
     with open(output_png_path, "rb") as f:
         supabase.storage.from_("audiofiles").upload(
             f"{upload_path}?upsert=true",
