@@ -358,6 +358,6 @@ def try_again_process_scale(name, notes):
 
 if __name__ == "__main__":
     import os
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))  # früher: 10000
     print(f"🚀 Starte Flask-Server auf Port {port}", flush=True)
     socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)

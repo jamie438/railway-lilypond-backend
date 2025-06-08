@@ -9,4 +9,5 @@ WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["gunicorn", "-b", "0.0.0.0:10000", "main:app"]
+# 👉 Wichtig: Hier auf Port 8080 wechseln
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "main:app"]
