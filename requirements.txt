@@ -10,5 +10,6 @@ fastdtw==0.3.4
 crepe==0.0.16
 psycopg2-binary==2.9.10
 supabase==1.0.3
-Pillow==10.3.0        # ✅ explizite Version empfohlen
+Pillow==10.3.0
 gunicorn==21.2.0
+PyJWT>=2.8.0
