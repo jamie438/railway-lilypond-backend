@@ -8,11 +8,14 @@ from pathlib import Path
 from supabase import create_client, Client
 import os
 from PIL import Image, ImageChops, ImageOps
-
+import jwt
+from jwt import InvalidTokenError
+import mimetypes
+import tempfile
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 SUPABASE_URL = "https://saxhvimwcbkkoxalhrqx.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGh2aW13Y2Jra294YWxocnF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ0OTA2MjYsImV4cCI6MjA2MDA2NjYyNn0.ocSTlhrSOq7ISwiPGOdMW7iksoxL5bO154kBGUDVQKY"
 
@@ -357,6 +360,162 @@ def try_again_process_scale(name, notes):
 
     print(f"🧠 Datenbankeintrag erstellt mit ID {new_id}")
 
+def sanitize_filename(filename: str) -> str:
+    # Nur Buchstaben, Zahlen, Unterstriche, Bindestriche und Punkt (für .pdf/.png) erlauben
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', filename)
+    return safe[:100]  # Optional: maximale Länge beschränken
+
+def verify_jwt_and_get_user_id(token: str):
+    try:
+        decoded = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
+        return decoded.get("sub")  # Supabase verwendet "sub" als user_id
+    except InvalidTokenError as e:
+        print(f"❌ JWT ungültig: {e}")
+        return None
+
+@app.route("/user_scores", methods=["POST"])
+def handle_upload_request():
+    # 🔐 1. Authorization-Header extrahieren
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Authorization fehlt"}), 401
+
+    token = auth_header.split(" ")[1]
+    user_id = verify_jwt_and_get_user_id(token)
+    if not user_id:
+        return jsonify({"error": "Ungültiger Token"}), 401
+
+    # 📎 2. Formulardaten + Datei extrahieren
+    file = request.files.get("file")
+    title = request.form.get("title", "")
+    subtitle = request.form.get("subtitle", "")
+    composer = request.form.get("composer", "")
+    difficulty = request.form.get("difficulty", "3")
+
+    if not file:
+        return jsonify({"error": "Keine Datei übergeben"}), 400
+
+    # ✅ 3. Weitergabe an Sicherheitsprüfung und Upload-Logik
+    return secure_process_upload(
+        file=file,
+        user_id=user_id,
+        title=title,
+        subtitle=subtitle,
+        composer=composer,
+        difficulty=difficulty
+    )
+
+ALLOWED_EXTENSIONS = {".pdf": "application/pdf", ".png": "image/png"}
+
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
+    original_filename = file.filename
+    safe_filename = sanitize_filename(original_filename)
+    ext = os.path.splitext(safe_filename)[1].lower()
+    mime = file.mimetype
+
+    # 1. Endung prüfen
+    if ext not in ALLOWED_EXTENSIONS:
+        return jsonify({"error": f"❌ Datei-Endung {ext} nicht erlaubt"}), 400
+
+    # 2. MIME-Type prüfen
+    expected_mime = ALLOWED_EXTENSIONS[ext]
+    if mime != expected_mime:
+        return jsonify({"error": f"❌ MIME-Type {mime} stimmt nicht mit {expected_mime} überein"}), 400
+
+    # 3. Dateigröße prüfen
+    file.seek(0, os.SEEK_END)
+    size = file.tell()
+    file.seek(0)
+
+    if size > MAX_FILE_SIZE:
+        return jsonify({"error": f"❌ Datei zu groß: {round(size / 1024 / 1024, 2)} MB (max. 10 MB)"}), 400
+
+    # 4. Malware-Scan
+    if not scan_file_with_clamav(file):
+        return jsonify({"error": "❌ Datei wurde als potenziell gefährlich erkannt"}), 400
+
+    print(f"✅ Gescannte Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB) von User {user_id}")
+    print(f"📄 Titel: {title}, Untertitel: {subtitle}, Komponist: {composer}, Schwierigkeit: {difficulty}")
+
+    # 📥 Eintrag in Supabase-Tabelle user_uploaded_scores
+    try:
+        data = {
+            "user_id": user_id,
+            "filename": safe_filename,
+            "title": title,
+            "subtitle": subtitle,
+            "composer": composer,
+            "difficulty": int(difficulty),
+        }
+
+        response = supabase.table("user_uploaded_scores").insert(data).execute()
+        if response.status_code != 201:
+            print(f"⚠️ Fehler beim Supabase-Insert: {response.data}")
+            return jsonify({"error": "Fehler beim Speichern in der Datenbank"}), 500
+
+        try:
+            # Datei zwischenspeichern
+            with tempfile.NamedTemporaryFile(delete=True) as temp:
+                file.save(temp.name)
+                file.seek(0)
+
+                # Pfad im Bucket
+                storage_path = f"media/user_scores/{user_id}_{safe_filename}"
+
+                # Datei als Base64 einlesen
+                with open(temp.name, "rb") as f:
+                    file_data = f.read()
+
+                # Hochladen
+                upload_response = supabase.storage \
+                    .from_("audiofiles") \
+                    .upload(path=storage_path, file=file_data, file_options={
+                    "content-type": mime,
+                    "upsert": True
+                })
+
+                if upload_response.get("error"):
+                    print(f"❌ Fehler beim Storage-Upload: {upload_response['error']['message']}")
+                    return jsonify({"error": "Fehler beim Hochladen der Datei"}), 500
+
+                print(f"✅ Datei erfolgreich in Supabase Storage hochgeladen: {storage_path}")
+
+        except Exception as e:
+            print(f"❌ Storage-Upload fehlgeschlagen: {e}")
+            return jsonify({"error": "Fehler beim Upload in Supabase Storage"}), 500
+
+        print("✅ Metadaten erfolgreich in Supabase gespeichert.")
+    except Exception as e:
+        print(f"❌ Insert fehlgeschlagen: {e}")
+        return jsonify({"error": "Fehler beim Supabase-Insert"}), 500
+
+    return jsonify({
+        "success": True,
+        "filename": safe_filename,
+        "message": "Datei akzeptiert und Metadaten gespeichert"
+    }), 200
+
+
+def scan_file_with_clamav(file) -> bool:
+    with tempfile.NamedTemporaryFile(delete=True) as temp:
+        file.save(temp.name)
+
+        try:
+            result = subprocess.run(
+                ["clamscan", "--no-summary", temp.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10
+            )
+
+            # Wenn clamscan 0 zurückgibt → kein Virus gefunden
+            return result.returncode == 0
+        except Exception as e:
+            print(f"⚠️ ClamAV-Scan fehlgeschlagen: {e}")
+            return False
 
 if __name__ == "__main__":
     import os
