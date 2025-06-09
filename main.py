@@ -410,71 +410,84 @@ ALLOWED_EXTENSIONS = {".pdf": "application/pdf", ".png": "image/png"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
-    original_filename = file.filename
-    safe_filename = sanitize_filename(original_filename)
-    ext = os.path.splitext(safe_filename)[1].lower()
-    mime = file.mimetype
-
-    # 1. Endung prüfen
-    if ext not in ALLOWED_EXTENSIONS:
-        return jsonify({"error": f"❌ Datei-Endung {ext} nicht erlaubt"}), 400
-
-    # 2. MIME-Type prüfen
-    expected_mime = ALLOWED_EXTENSIONS[ext]
-    if mime != expected_mime:
-        return jsonify({"error": f"❌ MIME-Type {mime} stimmt nicht mit {expected_mime} überein"}), 400
-
-    # 3. Dateigröße prüfen
-    file.seek(0, os.SEEK_END)
-    size = file.tell()
-    file.seek(0)
-
-    if size > MAX_FILE_SIZE:
-        return jsonify({"error": f"❌ Datei zu groß: {round(size / 1024 / 1024, 2)} MB (max. 10 MB)"}), 400
-
-    # 4. Malware-Scan
-    if not scan_file_with_clamav(file):
-        return jsonify({"error": "❌ Datei wurde als potenziell gefährlich erkannt"}), 400
-
-    print(f"✅ Gescannte Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB) von User {user_id}")
-    print(f"📄 Titel: {title}, Untertitel: {subtitle}, Komponist: {composer}, Schwierigkeit: {difficulty}")
-
-    # 📥 Eintrag in Supabase-Tabelle user_uploaded_scores
     try:
-        data = {
-            "user_id": user_id,
-            "filename": safe_filename,
-            "title": title,
-            "subtitle": subtitle,
-            "composer": composer,
-            "difficulty": int(difficulty),
-        }
+        print("📥 Upload-Vorgang gestartet")
+        print(f"👤 User ID: {user_id}")
+        print(f"📄 Titel: {title}, Untertitel: {subtitle}, Komponist: {composer}, Schwierigkeit: {difficulty}")
+        print(f"📎 Datei erhalten: {file.filename}, MIME-Type: {file.mimetype}")
 
-        response = supabase.table("user_uploaded_scores").insert(data).execute()
-        if response.status_code != 201:
-            print(f"⚠️ Fehler beim Supabase-Insert: {response.data}")
-            return jsonify({"error": "Fehler beim Speichern in der Datenbank"}), 500
+        original_filename = file.filename or "unnamed_file"
+        safe_filename = sanitize_filename(original_filename)
+        ext = os.path.splitext(safe_filename)[1].lower()
+        mime = file.mimetype or ""
 
+        # 1. Endung prüfen
+        if ext not in ALLOWED_EXTENSIONS:
+            print(f"❌ Nicht erlaubte Datei-Endung: {ext}")
+            return jsonify({"error": f"Dateiendung {ext} nicht erlaubt"}), 400
+
+        # 2. MIME-Type prüfen
+        expected_mime = ALLOWED_EXTENSIONS[ext]
+        if mime != expected_mime:
+            print(f"❌ MIME mismatch: erwartet {expected_mime}, erhalten {mime}")
+            return jsonify({"error": f"MIME-Type {mime} stimmt nicht mit {expected_mime} überein"}), 400
+
+        # 3. Dateigröße prüfen
+        file.seek(0, os.SEEK_END)
+        size = file.tell()
+        file.seek(0)
+        if size > MAX_FILE_SIZE:
+            print(f"❌ Datei zu groß: {size} Byte")
+            return jsonify({"error": f"Datei zu groß: {round(size / 1024 / 1024, 2)} MB (max. 10 MB)"}), 400
+
+        # 4. Malware-Scan mit Fehlerbehandlung
         try:
-            # Datei zwischenspeichern
+            scan_result = scan_file_with_clamav(file)
+            print(f"🛡️ ClamAV-Scan Ergebnis: {scan_result}")
+            if not scan_result:
+                return jsonify({"error": "❌ Datei wurde als potenziell gefährlich erkannt"}), 400
+        except Exception as e:
+            print(f"❌ Fehler beim Malware-Scan: {e}")
+            return jsonify({"error": "Malware-Scan fehlgeschlagen"}), 500
+
+        print(f"✅ Gescannte Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB)")
+
+        # 📥 Eintrag in Supabase-Tabelle
+        try:
+            data = {
+                "user_id": user_id,
+                "filename": safe_filename,
+                "title": title,
+                "subtitle": subtitle,
+                "composer": composer,
+                "difficulty": int(difficulty),
+            }
+
+            response = supabase.table("user_uploaded_scores").insert(data).execute()
+            print(f"📄 Supabase Insert Response: {response.data}")
+            if response.status_code != 201:
+                return jsonify({"error": "Fehler beim Speichern in der Datenbank"}), 500
+        except Exception as e:
+            print(f"❌ Fehler beim Supabase-Insert: {e}")
+            return jsonify({"error": "Fehler beim Supabase-Insert"}), 500
+
+        # 📤 Datei in Supabase Storage laden
+        try:
             with tempfile.NamedTemporaryFile(delete=True) as temp:
                 file.save(temp.name)
                 file.seek(0)
 
-                # Pfad im Bucket
-                storage_path = f"media/user_scores/{user_id}_{safe_filename}"
-
-                # Datei als Base64 einlesen
                 with open(temp.name, "rb") as f:
                     file_data = f.read()
 
-                # Hochladen
+                storage_path = f"media/user_scores/{user_id}_{safe_filename}"
+
                 upload_response = supabase.storage \
                     .from_("audiofiles") \
                     .upload(path=storage_path, file=file_data, file_options={
-                    "content-type": mime,
-                    "upsert": True
-                })
+                        "content-type": mime,
+                        "upsert": True
+                    })
 
                 if upload_response.get("error"):
                     print(f"❌ Fehler beim Storage-Upload: {upload_response['error']['message']}")
@@ -486,16 +499,16 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
             print(f"❌ Storage-Upload fehlgeschlagen: {e}")
             return jsonify({"error": "Fehler beim Upload in Supabase Storage"}), 500
 
-        print("✅ Metadaten erfolgreich in Supabase gespeichert.")
-    except Exception as e:
-        print(f"❌ Insert fehlgeschlagen: {e}")
-        return jsonify({"error": "Fehler beim Supabase-Insert"}), 500
+        print("✅ Upload vollständig abgeschlossen.")
+        return jsonify({
+            "success": True,
+            "filename": safe_filename,
+            "message": "Datei akzeptiert und Metadaten gespeichert"
+        }), 200
 
-    return jsonify({
-        "success": True,
-        "filename": safe_filename,
-        "message": "Datei akzeptiert und Metadaten gespeichert"
-    }), 200
+    except Exception as e:
+        print(f"💥 Unerwarteter Fehler beim Upload: {e}")
+        return jsonify({"error": "Unerwarteter Serverfehler"}), 500
 
 
 def scan_file_with_clamav(file) -> bool:
