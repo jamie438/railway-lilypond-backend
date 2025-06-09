@@ -15,10 +15,9 @@ import tempfile
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
-print(f"🔧 SUPABASE_JWT_SECRET vorhanden: {SUPABASE_JWT_SECRET is not None}")
-print(f"🔑 SECRET-Typ: {type(SUPABASE_JWT_SECRET)}")
+
+
 
 SUPABASE_URL = "https://saxhvimwcbkkoxalhrqx.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGh2aW13Y2Jra294YWxocnF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ0OTA2MjYsImV4cCI6MjA2MDA2NjYyNn0.ocSTlhrSOq7ISwiPGOdMW7iksoxL5bO154kBGUDVQKY"
@@ -371,10 +370,27 @@ def sanitize_filename(filename: str) -> str:
 
 def verify_jwt_and_get_user_id(token: str):
     try:
+        SUPABASE_JWT_SECRET = os.getenv("V/bE6SNzD/GdDk8wXAbY3nSHej2+VzDzI+N7FRCcIjPAe1hufwrpZbOQ7fSFbJ4l/VODoOa3hUF8dX2OCq+k1w==")
+        if not isinstance(SUPABASE_JWT_SECRET, str) or not SUPABASE_JWT_SECRET:
+            raise RuntimeError("❌ SUPABASE_JWT_SECRET nicht gesetzt oder kein String!")
+
+        print(f"🔐 SUPABASE_JWT_SECRET gesetzt. Token kommt rein: {token[:16]}...")
+
+        # Nur zum Debuggen: Tokeninhalt ohne Signatur prüfen
+        decoded_debug = jwt.decode(token, options={"verify_signature": False})
+        print("🔍 Inhalt vom JWT:", decoded_debug)
+
+        # Jetzt wirklich prüfen:
         decoded = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
-        return decoded.get("sub")  # Supabase verwendet "sub" als user_id
+        print("✅ Signatur OK. Decoded:", decoded)
+
+        return decoded.get("sub")  # das ist die user_id
+
     except InvalidTokenError as e:
         print(f"❌ JWT ungültig: {e}")
+        return None
+    except Exception as e:
+        print(f"💥 Sonstiger JWT-Fehler: {e}")
         return None
 
 @app.route("/user_scores", methods=["POST"])
