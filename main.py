@@ -378,7 +378,7 @@ def verify_jwt_and_get_user_id(token: str):
 
         # Nur zum Debuggen: Tokeninhalt ohne Signatur prüfen
         decoded_debug = jwt.decode(token, options={"verify_signature": False})
-        print("🔍 Inhalt vom JWT:", decoded_debug)
+        print("🔍 JWT-Inhalt (unsigniert):", decoded_debug)
 
         # Jetzt wirklich prüfen:
         decoded = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
