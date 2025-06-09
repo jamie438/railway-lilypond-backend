@@ -16,6 +16,10 @@ import tempfile
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+print(f"🔧 SUPABASE_JWT_SECRET vorhanden: {SUPABASE_JWT_SECRET is not None}")
+print(f"🔑 SECRET-Typ: {type(SUPABASE_JWT_SECRET)}")
+
 SUPABASE_URL = "https://saxhvimwcbkkoxalhrqx.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGh2aW13Y2Jra294YWxocnF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ0OTA2MjYsImV4cCI6MjA2MDA2NjYyNn0.ocSTlhrSOq7ISwiPGOdMW7iksoxL5bO154kBGUDVQKY"
 
