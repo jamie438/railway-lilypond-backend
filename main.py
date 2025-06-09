@@ -370,7 +370,8 @@ def sanitize_filename(filename: str) -> str:
 
 def verify_jwt_and_get_user_id(token: str):
     try:
-        SUPABASE_JWT_SECRET = os.getenv("V/bE6SNzD/GdDk8wXAbY3nSHej2+VzDzI+N7FRCcIjPAe1hufwrpZbOQ7fSFbJ4l/VODoOa3hUF8dX2OCq+k1w==")
+        SUPABASE_JWT_SECRET = "V/bE6SNzD/GdDk8wXAbY3nSHej2+VzDzI+N7FRCcIjPAe1hufwrpZbOQ7fSFbJ4l/VODoOa3hUF8dX2OCq+k1w=="
+
         if not isinstance(SUPABASE_JWT_SECRET, str) or not SUPABASE_JWT_SECRET:
             raise RuntimeError("❌ SUPABASE_JWT_SECRET nicht gesetzt oder kein String!")
 
