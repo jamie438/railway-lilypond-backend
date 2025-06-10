@@ -21,7 +21,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 
 SUPABASE_URL = "https://saxhvimwcbkkoxalhrqx.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGh2aW13Y2Jra294YWxocnF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDQ0OTA2MjYsImV4cCI6MjA2MDA2NjYyNn0.ocSTlhrSOq7ISwiPGOdMW7iksoxL5bO154kBGUDVQKY"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGh2aW13Y2Jra294YWxocnF4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTQ1OTk3NCwiZXhwIjoyMDY1MDM1OTc0fQ.8ovzcbJlHJnEc_yKdA0XrOs-Ks7ALTovwcMn9ElpNcM"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "audiofiles"
