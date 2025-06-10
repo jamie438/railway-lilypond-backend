@@ -12,6 +12,7 @@ import jwt
 from jwt import InvalidTokenError
 import mimetypes
 import tempfile
+import requests
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
@@ -439,102 +440,88 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
     print("➡️ secure_process_upload wird aufgerufen", flush=True)
 
     try:
+        # 🧾 Basisinfos loggen
         print("📥 Upload-Vorgang gestartet")
         print(f"👤 User ID: {user_id}")
         print(f"📄 Titel: {title}, Untertitel: {subtitle}, Komponist: {composer}, Schwierigkeit: {difficulty}")
         print(f"📎 Datei erhalten: {file.filename}, MIME-Type: {file.mimetype}")
 
+        # 🔐 Dateiname und MIME prüfen
         original_filename = file.filename or "unnamed_file"
         safe_filename = sanitize_filename(original_filename)
         ext = os.path.splitext(safe_filename)[1].lower()
         mime = file.mimetype or ""
 
-        # 1. Endung prüfen
         if ext not in ALLOWED_EXTENSIONS:
             print(f"❌ Nicht erlaubte Datei-Endung: {ext}")
             return jsonify({"error": f"Dateiendung {ext} nicht erlaubt"}), 400
 
-        # 2. MIME-Type prüfen
         expected_mime = ALLOWED_EXTENSIONS[ext]
         if mime != expected_mime:
             print(f"❌ MIME mismatch: erwartet {expected_mime}, erhalten {mime}")
             return jsonify({"error": f"MIME-Type {mime} stimmt nicht mit {expected_mime} überein"}), 400
 
-        # 3. Dateigröße prüfen
+        # 📏 Größe prüfen
         file.seek(0, os.SEEK_END)
         size = file.tell()
         file.seek(0)
         if size > MAX_FILE_SIZE:
             print(f"❌ Datei zu groß: {size} Byte")
-            return jsonify({"error": f"Datei zu groß: {round(size / 1024 / 1024, 2)} MB (max. 10 MB)"}), 400
+            return jsonify({"error": "Datei zu groß (max. 10 MB)"}), 400
 
-        # 4. Malware-Scan mit Fehlerbehandlung
+        print(f"✅ Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB)")
 
-
-        print(f"✅ Gescannte Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB)")
-
-        # 📥 Eintrag in Supabase-Tabelle
+        # 🗃️ Eintrag in PostgreSQL
         try:
-            data = {
-                "user_id": user_id,
-                "filename": safe_filename,
-                "title": title,
-                "subtitle": subtitle,
-                "composer": composer,
-                "difficulty": int(difficulty),
-            }
-
-            response = supabase.table("user_uploaded_scores").insert(data).execute()
-            print(f"📄 Supabase Insert Status: {getattr(response, 'status_code', 'kein Status')}", flush=True)
-            print(f"📄 Supabase Insert Data: {getattr(response, 'data', 'keine Daten')}", flush=True)
-
-            if hasattr(response, "status_code") and response.status_code != 201:
-                return jsonify({"error": f"Insert fehlgeschlagen: {response.status_code}"}), 500
-
-            if response.status_code != 201:
-                return jsonify({"error": "Fehler beim Speichern in der Datenbank"}), 500
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO user_uploaded_scores (user_id, filename, title, subtitle, composer, difficulty, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            """, (user_id, safe_filename, title, subtitle, composer, int(difficulty)))
+            conn.commit()
+            cur.close()
+            print("✅ Metadaten erfolgreich in PostgreSQL gespeichert.")
         except Exception as e:
-            print(f"❌ Fehler beim Supabase-Insert: {e}")
-            return jsonify({"error": "Fehler beim Supabase-Insert"}), 500
+            print(f"❌ Fehler beim DB-Insert: {e}")
+            return jsonify({"error": "Fehler beim DB-Speichern"}), 500
 
-        # 📤 Datei in Supabase Storage laden
+        # ☁️ Upload in Supabase Storage per HTTP PUT
         try:
             with tempfile.NamedTemporaryFile(delete=True) as temp:
                 file.save(temp.name)
                 file.seek(0)
-
                 with open(temp.name, "rb") as f:
                     file_data = f.read()
 
                 storage_path = f"media/user_scores/{user_id}_{safe_filename}"
+                url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET_NAME}/{storage_path}"
+                headers = {
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": mime,
+                    "x-upsert": "true"
+                }
 
-                upload_response = supabase.storage \
-                    .from_("audiofiles") \
-                    .upload(path=storage_path, file=file_data, file_options={
-                        "content-type": mime,
-                        "upsert": True
-                    })
+                response = requests.put(url, headers=headers, data=file_data)
+                print(f"📤 Supabase Storage Upload Status: {response.status_code}")
+                if response.status_code >= 300:
+                    print(f"❌ Fehler beim Upload: {response.text}")
+                    return jsonify({"error": "Fehler beim Datei-Upload"}), 500
 
-                print(f"📤 Upload Response: {upload_response}", flush=True)
-                if isinstance(upload_response, dict) and upload_response.get("error"):
-                    print(f"❌ Fehler beim Storage-Upload: {upload_response['error']['message']}", flush=True)
-
-                print(f"✅ Datei erfolgreich in Supabase Storage hochgeladen: {storage_path}")
-
+                print(f"✅ Datei erfolgreich hochgeladen: {storage_path}")
         except Exception as e:
-            print(f"❌ Storage-Upload fehlgeschlagen: {e}")
-            return jsonify({"error": "Fehler beim Upload in Supabase Storage"}), 500
+            print(f"❌ Fehler beim Datei-Upload: {e}")
+            return jsonify({"error": "Fehler beim Datei-Upload"}), 500
 
-        print("✅ Upload vollständig abgeschlossen.")
         return jsonify({
             "success": True,
             "filename": safe_filename,
-            "message": "Datei akzeptiert und Metadaten gespeichert"
+            "message": "Datei + Daten erfolgreich gespeichert"
         }), 200
 
     except Exception as e:
-        print(f"💥 Unerwarteter Fehler beim Upload: {e}")
-        return jsonify({"error": "Unerwarteter Serverfehler"}), 500
+        print(f"💥 Unerwarteter Fehler: {e}")
+        return jsonify({"error": "Unerwarteter Fehler beim Upload"}), 500
 
 
 DEV_MODE = True  # 🔁 Immer aktiv beim lokalen Entwickeln
