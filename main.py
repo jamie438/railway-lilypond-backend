@@ -373,44 +373,38 @@ OWN_SECRET_KEY = "meinSuperGeheimerKey123"
 import uuid
 
 def verify_jwt_and_get_user_id(token: str):
+    """
+    Verifiziert den JWT und extrahiert die user_id.
+    Erwartet, dass die user_id ein Integer ist.
+    """
     try:
-        print(f"🔐 Token kommt rein: {token[:16]}...", flush=True)
+        print(f"🔐 Token wird geprüft: {token[:16]}...", flush=True)
 
-        decoded_debug = jwt.decode(token, options={"verify_signature": False})
-        print("🔍 JWT-Inhalt (unsigniert):", decoded_debug, flush=True)
-
+        # Token dekodieren und Signatur prüfen
         decoded = jwt.decode(token, OWN_SECRET_KEY, algorithms=["HS256"])
-        print("✅ Signatur OK. Decoded:", decoded, flush=True)
+        print("✅ Signatur OK. Inhalt:", decoded, flush=True)
 
-        user_id_raw = decoded.get("user_id")
+        user_id = decoded.get("user_id")
 
-        # 🔁 Typ unterscheiden
-        if isinstance(user_id_raw, int):
-            print(f"🧾 user_id als int: {user_id_raw}")
-            return user_id_raw  # direkt so verwenden
+        # Einfache Prüfung: Ist die user_id ein Integer?
+        if isinstance(user_id, int):
+            print(f"🧾 Gültige user_id (int) gefunden: {user_id}")
+            return user_id
+        else:
+            print(f"❌ user_id ist kein Integer oder fehlt. Typ: {type(user_id)}")
+            return None
 
-        if isinstance(user_id_raw, str):
-            try:
-                user_id_uuid = uuid.UUID(user_id_raw)
-                print(f"🧾 user_id als UUID: {user_id_uuid}")
-                return str(user_id_uuid)  # ← als String zurückgeben für SQL-Insert
-            except Exception as e:
-                print(f"❌ Ungültige UUID-String: {user_id_raw} ({e})")
-                return None
-
-        print("❌ user_id hat unbekannten Typ", flush=True)
-        return None
-
-    except InvalidTokenError as e:
+    except jwt.InvalidTokenError as e:
         print(f"❌ JWT ungültig: {e}", flush=True)
         return None
     except Exception as e:
-        print(f"💥 Fehler beim JWT-Check: {e}", flush=True)
+        print(f"💥 Allgemeiner Fehler beim JWT-Check: {e}", flush=True)
         return None
+
+
 
 @app.route("/user_scores", methods=["POST"])
 def handle_upload_request():
-    # 🔐 Authentifizieren über Authorization-Header
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return jsonify({"error": "Kein gültiger Bearer-Token"}), 401
@@ -418,28 +412,22 @@ def handle_upload_request():
     token = auth_header.replace("Bearer ", "")
     user_id = verify_jwt_and_get_user_id(token)
     if not user_id:
-        return jsonify({"error": "Token ungültig"}), 403
+        return jsonify({"error": "Token ungültig oder keine gültige User-ID"}), 403
 
     print(f"✅ Authentifiziert als user_id: {user_id}")
 
-    # 📎 Formulardaten & Datei extrahieren
+    # Formulardaten extrahieren
     file = request.files.get("file")
-    title = request.form.get("title", "")
-    subtitle = request.form.get("subtitle", "")
-    composer = request.form.get("composer", "")
-    difficulty = request.form.get("difficulty", "3")
-
-    if not file:
+    if not file or not file.filename:
         return jsonify({"error": "Keine Datei übergeben"}), 400
 
-    # ✅ Weitergabe an Upload-Logik
     return secure_process_upload(
         file=file,
-        user_id=user_id,  # kommt jetzt aus dem verifizierten Token
-        title=title,
-        subtitle=subtitle,
-        composer=composer,
-        difficulty=difficulty
+        user_id=user_id,
+        title=request.form.get("title", ""),
+        subtitle=request.form.get("subtitle", ""),
+        composer=request.form.get("composer", ""),
+        difficulty=request.form.get("difficulty", "3")
     )
 
 
@@ -447,93 +435,70 @@ ALLOWED_EXTENSIONS = {".pdf": "application/pdf", ".png": "image/png"}
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
+
 def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
+    """
+    Verarbeitet den Upload sicher: prüft Datei und speichert sie in DB und Storage.
+    """
     print("➡️ secure_process_upload wird aufgerufen", flush=True)
 
     try:
-        # 🧾 Basisinfos loggen
-        print("📥 Upload-Vorgang gestartet")
-        print(f"👤 User ID: {user_id}")
-        print(f"📄 Titel: {title}, Untertitel: {subtitle}, Komponist: {composer}, Schwierigkeit: {difficulty}")
-        print(f"📎 Datei erhalten: {file.filename}, MIME-Type: {file.mimetype}")
-
-        # 🔐 Dateiname und MIME prüfen
-        original_filename = file.filename or "unnamed_file"
-        safe_filename = sanitize_filename(original_filename)
+        # 🔐 Dateiprüfungen (Name, Typ, Größe)
+        safe_filename = sanitize_filename(file.filename or "unnamed")
         ext = os.path.splitext(safe_filename)[1].lower()
-        mime = file.mimetype or ""
+        mime = file.mimetype
 
-        if ext not in ALLOWED_EXTENSIONS:
-            print(f"❌ Nicht erlaubte Datei-Endung: {ext}")
-            return jsonify({"error": f"Dateiendung {ext} nicht erlaubt"}), 400
+        if ext not in ALLOWED_EXTENSIONS or mime != ALLOWED_EXTENSIONS.get(ext):
+            print(f"❌ Unerlaubter Dateityp: {safe_filename} (MIME: {mime})")
+            return jsonify({"error": "Dateityp nicht erlaubt"}), 400
 
-        expected_mime = ALLOWED_EXTENSIONS[ext]
-        if mime != expected_mime:
-            print(f"❌ MIME mismatch: erwartet {expected_mime}, erhalten {mime}")
-            return jsonify({"error": f"MIME-Type {mime} stimmt nicht mit {expected_mime} überein"}), 400
-
-        # 📏 Größe prüfen
         file.seek(0, os.SEEK_END)
         size = file.tell()
         file.seek(0)
         if size > MAX_FILE_SIZE:
-            print(f"❌ Datei zu groß: {size} Byte")
-            return jsonify({"error": "Datei zu groß (max. 10 MB)"}), 400
+            print(f"❌ Datei zu groß: {size / 1024:.2f} KB")
+            return jsonify({"error": "Datei zu groß (max. 10 MB)"}), 400
 
-        print(f"✅ Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB)")
+        print(f"✅ Datei OK: {safe_filename} ({size / (1024 * 1024):.2f} MB)")
 
-        # 🗃️ Eintrag in PostgreSQL
+        # 🗃️ Eintrag in PostgreSQL (user_id wird jetzt als int übergeben)
         try:
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO user_uploaded_scores (user_id, filename, title, subtitle, composer, difficulty, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW())
-            """, (str(user_id), safe_filename, title, subtitle, composer, int(difficulty)))
-
+                INSERT INTO user_uploaded_scores (user_id, filename, title, subtitle, composer, difficulty)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (user_id, safe_filename, title, subtitle, composer, int(difficulty)))
             conn.commit()
             cur.close()
-            print("✅ Metadaten erfolgreich in PostgreSQL gespeichert.")
+            conn.close()
+            print("✅ Metadaten in PostgreSQL gespeichert.")
         except Exception as e:
             print(f"❌ Fehler beim DB-Insert: {e}")
-            return jsonify({"error": "Fehler beim DB-Speichern"}), 500
+            return jsonify({"error": "Fehler beim Speichern der Daten"}), 500
 
-        # ☁️ Upload in Supabase Storage per HTTP PUT
+        # ☁️ Upload in Supabase Storage
         try:
-            with tempfile.NamedTemporaryFile(delete=True) as temp:
-                file.save(temp.name)
-                file.seek(0)
-                with open(temp.name, "rb") as f:
-                    file_data = f.read()
+            storage_path = f"media/user_scores/{user_id}_{safe_filename}"
+            url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET_NAME}/{storage_path}"
+            headers = {"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": mime, "x-upsert": "true"}
 
-                storage_path = f"media/user_scores/{user_id}_{safe_filename}"
-                url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET_NAME}/{storage_path}"
-                headers = {
-                    "Authorization": f"Bearer {SUPABASE_KEY}",
-                    "Content-Type": mime,
-                    "x-upsert": "true"
-                }
+            response = requests.put(url, headers=headers, data=file.read())
 
-                response = requests.put(url, headers=headers, data=file_data)
-                print(f"📤 Supabase Storage Upload Status: {response.status_code}")
-                if response.status_code >= 300:
-                    print(f"❌ Fehler beim Upload: {response.text}")
-                    return jsonify({"error": "Fehler beim Datei-Upload"}), 500
+            if response.status_code >= 300:
+                print(f"❌ Fehler beim Upload zu Supabase: {response.text}")
+                return jsonify({"error": "Fehler beim Datei-Upload"}), 500
 
-                print(f"✅ Datei erfolgreich hochgeladen: {storage_path}")
+            print(f"✅ Datei erfolgreich hochgeladen: {storage_path}")
         except Exception as e:
             print(f"❌ Fehler beim Datei-Upload: {e}")
             return jsonify({"error": "Fehler beim Datei-Upload"}), 500
 
-        return jsonify({
-            "success": True,
-            "filename": safe_filename,
-            "message": "Datei + Daten erfolgreich gespeichert"
-        }), 200
+        return jsonify({"success": True, "message": "Datei und Daten erfolgreich verarbeitet"}), 200
 
     except Exception as e:
-        print(f"💥 Unerwarteter Fehler: {e}")
-        return jsonify({"error": "Unerwarteter Fehler beim Upload"}), 500
+        print(f"💥 Unerwarteter Fehler in secure_process_upload: {e}")
+        return jsonify({"error": "Ein unerwarteter Fehler ist aufgetreten"}), 500
 
 
 DEV_MODE = True  # 🔁 Immer aktiv beim lokalen Entwickeln
