@@ -372,26 +372,28 @@ OWN_SECRET_KEY = "meinSuperGeheimerKey123"
 
 def verify_jwt_and_get_user_id(token: str):
     try:
-        # Optionales Debuggen – Payload ohne Prüfung
-        decoded_debug = jwt.decode(token, options={"verify_signature": False})
-        print("🔍 JWT-Inhalt (unsigniert):", decoded_debug)
+        print(f"🔐 Token kommt rein: {token[:16]}...", flush=True)
 
-        # Verifikation mit eigenem Secret
+        # Nur zum Debuggen: Unsignierter Inhalt
+        decoded_debug = jwt.decode(token, options={"verify_signature": False})
+        print("🔍 JWT-Inhalt (unsigniert):", decoded_debug, flush=True)
+
+        # 🔐 Jetzt mit HMAC-SHA256 verifizieren
         decoded = jwt.decode(token, OWN_SECRET_KEY, algorithms=["HS256"])
-        print("✅ Token-Signatur korrekt:", decoded)
+        print("✅ Signatur OK. Decoded:", decoded, flush=True)
 
         user_id = decoded.get("user_id")
         if not user_id:
-            print("❌ Kein user_id im Token-Payload gefunden")
+            print("❌ Kein user_id im Payload", flush=True)
             return None
 
         return user_id
 
     except InvalidTokenError as e:
-        print(f"❌ JWT ungültig: {e}")
+        print(f"❌ JWT ungültig: {e}", flush=True)
         return None
     except Exception as e:
-        print(f"💥 Fehler beim JWT-Check: {e}")
+        print(f"💥 Fehler beim JWT-Check: {e}", flush=True)
         return None
 
 @app.route("/user_scores", methods=["POST"])
