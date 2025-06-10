@@ -370,29 +370,36 @@ def sanitize_filename(filename: str) -> str:
     return safe[:100]  # Optional: maximale Länge beschränken
 
 OWN_SECRET_KEY = "meinSuperGeheimerKey123"
+import uuid
 
 def verify_jwt_and_get_user_id(token: str):
     try:
         print(f"🔐 Token kommt rein: {token[:16]}...", flush=True)
 
-        # Nur zum Debuggen: Unsignierter Inhalt
         decoded_debug = jwt.decode(token, options={"verify_signature": False})
         print("🔍 JWT-Inhalt (unsigniert):", decoded_debug, flush=True)
 
-        # 🔐 Jetzt mit HMAC-SHA256 verifizieren
         decoded = jwt.decode(token, OWN_SECRET_KEY, algorithms=["HS256"])
         print("✅ Signatur OK. Decoded:", decoded, flush=True)
 
-        import uuid
+        user_id_raw = decoded.get("user_id")
 
-        user_id_str = str(decoded.get("user_id"))  # ← das ist vermutlich bereits ein richtiger UUID-String
-        user_id = uuid.UUID(user_id_str)  # ← ergibt ein UUID-Objekt
+        # 🔁 Typ unterscheiden
+        if isinstance(user_id_raw, int):
+            print(f"🧾 user_id als int: {user_id_raw}")
+            return user_id_raw  # direkt so verwenden
 
-        if not user_id:
-            print("❌ Kein user_id im Payload", flush=True)
-            return None
+        if isinstance(user_id_raw, str):
+            try:
+                user_id_uuid = uuid.UUID(user_id_raw)
+                print(f"🧾 user_id als UUID: {user_id_uuid}")
+                return str(user_id_uuid)  # ← als String zurückgeben für SQL-Insert
+            except Exception as e:
+                print(f"❌ Ungültige UUID-String: {user_id_raw} ({e})")
+                return None
 
-        return user_id
+        print("❌ user_id hat unbekannten Typ", flush=True)
+        return None
 
     except InvalidTokenError as e:
         print(f"❌ JWT ungültig: {e}", flush=True)
