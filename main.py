@@ -383,7 +383,15 @@ def verify_jwt_and_get_user_id(token: str):
         decoded = jwt.decode(token, OWN_SECRET_KEY, algorithms=["HS256"])
         print("✅ Signatur OK. Decoded:", decoded, flush=True)
 
-        user_id = decoded.get("user_id")
+        import uuid
+
+        user_id_str = str(decoded.get("user_id"))
+        try:
+            user_id = uuid.UUID(user_id_str)
+        except Exception as e:
+            print(f"❌ Ungültige UUID: {user_id_str} ({e})")
+            return None
+
         if not user_id:
             print("❌ Kein user_id im Payload", flush=True)
             return None
