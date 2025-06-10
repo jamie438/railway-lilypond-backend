@@ -486,7 +486,7 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
 
         # ☁️ Upload in Supabase Storage
         try:
-            storage_path = f"media/user_scores/{user_id}_{safe_filename}"
+            storage_path = f"media/user_scores/{user_id}_{title}"
             url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET_NAME}/{storage_path}"
             headers = {"Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": mime, "x-upsert": "true"}
 
