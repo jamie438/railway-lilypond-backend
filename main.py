@@ -385,12 +385,8 @@ def verify_jwt_and_get_user_id(token: str):
 
         import uuid
 
-        user_id_str = str(decoded.get("user_id"))
-        try:
-            user_id = uuid.UUID(user_id_str)
-        except Exception as e:
-            print(f"❌ Ungültige UUID: {user_id_str} ({e})")
-            return None
+        user_id_str = str(decoded.get("user_id"))  # ← das ist vermutlich bereits ein richtiger UUID-String
+        user_id = uuid.UUID(user_id_str)  # ← ergibt ein UUID-Objekt
 
         if not user_id:
             print("❌ Kein user_id im Payload", flush=True)
@@ -486,7 +482,8 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
             cur.execute("""
                 INSERT INTO user_uploaded_scores (user_id, filename, title, subtitle, composer, difficulty, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, NOW())
-            """, (user_id, safe_filename, title, subtitle, composer, int(difficulty)))
+            """, (str(user_id), safe_filename, title, subtitle, composer, int(difficulty)))
+
             conn.commit()
             cur.close()
             print("✅ Metadaten erfolgreich in PostgreSQL gespeichert.")
