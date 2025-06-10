@@ -465,16 +465,23 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
         try:
             conn = get_db_connection()
             cur = conn.cursor()
+
+            # KORREKTE ANWEISUNG:
+            # Wir listen hier EXAKT die Spalten auf, die wir befüllen wollen.
+            # Die Spalte 'id' wird ausgelassen, damit die Datenbank sie automatisch füllt.
+            # Die Datenbank weiß jetzt: der erste Wert (%s) gehört zu 'user_id', der zweite zu 'filename' usw.
             cur.execute("""
                 INSERT INTO user_uploaded_scores (user_id, filename, title, subtitle, composer, difficulty)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (user_id, safe_filename, title, subtitle, composer, int(difficulty)))
+
             conn.commit()
             cur.close()
             conn.close()
             print("✅ Metadaten in PostgreSQL gespeichert.")
         except Exception as e:
             print(f"❌ Fehler beim DB-Insert: {e}")
+
             return jsonify({"error": "Fehler beim Speichern der Daten"}), 500
 
         # ☁️ Upload in Supabase Storage
