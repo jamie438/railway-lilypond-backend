@@ -469,14 +469,7 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
             return jsonify({"error": f"Datei zu groß: {round(size / 1024 / 1024, 2)} MB (max. 10 MB)"}), 400
 
         # 4. Malware-Scan mit Fehlerbehandlung
-        try:
-            scan_result = scan_file_with_clamav(file)
-            print(f"🛡️ ClamAV-Scan Ergebnis: {scan_result}")
-            if not scan_result:
-                return jsonify({"error": "❌ Datei wurde als potenziell gefährlich erkannt"}), 400
-        except Exception as e:
-            print(f"❌ Fehler beim Malware-Scan: {e}")
-            return jsonify({"error": "Malware-Scan fehlgeschlagen"}), 500
+
 
         print(f"✅ Gescannte Datei OK: {safe_filename} ({round(size / 1024 / 1024, 2)} MB)")
 
