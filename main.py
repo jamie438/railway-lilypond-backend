@@ -368,48 +368,47 @@ def sanitize_filename(filename: str) -> str:
     safe = re.sub(r'[^A-Za-z0-9._-]', '_', filename)
     return safe[:100]  # Optional: maximale Länge beschränken
 
+OWN_SECRET_KEY = "meinSuperGeheimerKey123"
+
 def verify_jwt_and_get_user_id(token: str):
     try:
-        decoded_debug = jwt.decode(token, options={"verify_signature": False})
-        print("🔍 JWT Inhalt:", decoded_debug)
-
-        SUPABASE_JWT_SECRET = "V/bE6SNzD/GdDk8wXAbY3nSHej2+VzDzI+N7FRCcIjPAe1hufwrpZbOQ7fSFbJ4l/VODoOa3hUF8dX2OCq+k1w=="
-
-        if not isinstance(SUPABASE_JWT_SECRET, str) or not SUPABASE_JWT_SECRET:
-            raise RuntimeError("❌ SUPABASE_JWT_SECRET nicht gesetzt oder kein String!")
-
-        print(f"🔐 SUPABASE_JWT_SECRET gesetzt. Token kommt rein: {token[:16]}...")
-
-        # Nur zum Debuggen: Tokeninhalt ohne Signatur prüfen
+        # Optionales Debuggen – Payload ohne Prüfung
         decoded_debug = jwt.decode(token, options={"verify_signature": False})
         print("🔍 JWT-Inhalt (unsigniert):", decoded_debug)
 
-        # Jetzt wirklich prüfen:
-        decoded = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
-        print("✅ Signatur OK. Decoded:", decoded)
+        # Verifikation mit eigenem Secret
+        decoded = jwt.decode(token, OWN_SECRET_KEY, algorithms=["HS256"])
+        print("✅ Token-Signatur korrekt:", decoded)
 
-        return decoded.get("sub")  # das ist die user_id
+        user_id = decoded.get("user_id")
+        if not user_id:
+            print("❌ Kein user_id im Token-Payload gefunden")
+            return None
+
+        return user_id
 
     except InvalidTokenError as e:
         print(f"❌ JWT ungültig: {e}")
         return None
     except Exception as e:
-        print(f"💥 Sonstiger JWT-Fehler: {e}")
+        print(f"💥 Fehler beim JWT-Check: {e}")
         return None
 
 @app.route("/user_scores", methods=["POST"])
 def handle_upload_request():
-    # 🔐 1. Authorization-Header extrahieren
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return jsonify({"error": "Authorization fehlt"}), 401
+    # 🔐 Authentifizieren über Authorization-Header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "Kein gültiger Bearer-Token"}), 401
 
-    token = auth_header.split(" ")[1]
+    token = auth_header.replace("Bearer ", "")
     user_id = verify_jwt_and_get_user_id(token)
     if not user_id:
-        return jsonify({"error": "Ungültiger Token"}), 401
+        return jsonify({"error": "Token ungültig"}), 403
 
-    # 📎 2. Formulardaten + Datei extrahieren
+    print(f"✅ Authentifiziert als user_id: {user_id}")
+
+    # 📎 Formulardaten & Datei extrahieren
     file = request.files.get("file")
     title = request.form.get("title", "")
     subtitle = request.form.get("subtitle", "")
@@ -419,15 +418,16 @@ def handle_upload_request():
     if not file:
         return jsonify({"error": "Keine Datei übergeben"}), 400
 
-    # ✅ 3. Weitergabe an Sicherheitsprüfung und Upload-Logik
+    # ✅ Weitergabe an Upload-Logik
     return secure_process_upload(
         file=file,
-        user_id=user_id,
+        user_id=user_id,  # kommt jetzt aus dem verifizierten Token
         title=title,
         subtitle=subtitle,
         composer=composer,
         difficulty=difficulty
     )
+
 
 ALLOWED_EXTENSIONS = {".pdf": "application/pdf", ".png": "image/png"}
 
