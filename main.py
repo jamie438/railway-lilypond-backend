@@ -436,6 +436,8 @@ ALLOWED_EXTENSIONS = {".pdf": "application/pdf", ".png": "image/png"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
+    print("➡️ secure_process_upload wird aufgerufen", flush=True)
+
     try:
         print("📥 Upload-Vorgang gestartet")
         print(f"👤 User ID: {user_id}")
@@ -490,7 +492,12 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
             }
 
             response = supabase.table("user_uploaded_scores").insert(data).execute()
-            print(f"📄 Supabase Insert Response: {response.data}")
+            print(f"📄 Supabase Insert Status: {getattr(response, 'status_code', 'kein Status')}", flush=True)
+            print(f"📄 Supabase Insert Data: {getattr(response, 'data', 'keine Daten')}", flush=True)
+
+            if hasattr(response, "status_code") and response.status_code != 201:
+                return jsonify({"error": f"Insert fehlgeschlagen: {response.status_code}"}), 500
+
             if response.status_code != 201:
                 return jsonify({"error": "Fehler beim Speichern in der Datenbank"}), 500
         except Exception as e:
@@ -515,9 +522,9 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
                         "upsert": True
                     })
 
-                if upload_response.get("error"):
-                    print(f"❌ Fehler beim Storage-Upload: {upload_response['error']['message']}")
-                    return jsonify({"error": "Fehler beim Hochladen der Datei"}), 500
+                print(f"📤 Upload Response: {upload_response}", flush=True)
+                if isinstance(upload_response, dict) and upload_response.get("error"):
+                    print(f"❌ Fehler beim Storage-Upload: {upload_response['error']['message']}", flush=True)
 
                 print(f"✅ Datei erfolgreich in Supabase Storage hochgeladen: {storage_path}")
 
