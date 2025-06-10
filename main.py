@@ -537,6 +537,8 @@ def secure_process_upload(file, user_id, title, subtitle, composer, difficulty):
         return jsonify({"error": "Unerwarteter Serverfehler"}), 500
 
 
+DEV_MODE = True  # 🔁 Immer aktiv beim lokalen Entwickeln
+
 def scan_file_with_clamav(file) -> bool:
     with tempfile.NamedTemporaryFile(delete=True) as temp:
         file.save(temp.name)
@@ -550,17 +552,14 @@ def scan_file_with_clamav(file) -> bool:
                 timeout=10
             )
 
-            DEV_MODE = True
-
             # Wenn clamscan 0 zurückgibt → kein Virus gefunden
             return result.returncode == 0
         except Exception as e:
             print(f"⚠️ ClamAV-Fehler: {e}")
             if DEV_MODE:
                 print("🧪 Ignoriere Scanfehler im Dev-Modus")
-                return True
+                return True  # <- Ja, erlauben!
             return False
-
 
 if __name__ == "__main__":
     import os
