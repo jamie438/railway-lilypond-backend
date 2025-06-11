@@ -13,6 +13,9 @@ from jwt import InvalidTokenError
 import mimetypes
 import tempfile
 import requests
+from datetime import date, datetime
+from psycopg2.extras import json
+
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
@@ -531,6 +534,897 @@ def scan_file_with_clamav(file) -> bool:
                 print("🧪 Ignoriere Scanfehler im Dev-Modus")
                 return True  # <- Ja, erlauben!
             return False
+
+
+@app.route("/level_exercises", methods=["POST"])
+def update_level_exercises():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Keine Daten empfangen"}), 400
+
+        level_exercises = data.get("level_exercises")
+        user_id = data.get("user_id")
+        if level_exercises is None or user_id is None:
+            return jsonify({"error": "level_exercises und user_id müssen angegeben werden."}), 400
+
+        level_exercises_str = json.dumps(level_exercises)
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET level_exercises = %s WHERE id = %s", (level_exercises_str, user_id))
+        conn.commit()
+        conn.close()
+
+        # ✅ Neue PNGs generieren
+        for exercise_name, level in level_exercises.items():
+            try:
+                generate_exercise_png(exercise_name, level, user_id)
+            except Exception as gen_err:
+                print(f"⚠️ Fehler beim Generieren von PNG für {exercise_name} (Level {level}):", gen_err)
+
+        return jsonify({"message": "Level exercises erfolgreich aktualisiert"}), 200
+
+    except Exception as e:
+        print("❌ Fehler beim Aktualisieren der level exercises:", e)
+        return jsonify({"error": "Fehler beim Aktualisieren der level exercises"}), 500
+
+
+def generate_exercise_png(exercise_name: str, level: int, user_id: int):
+    # 🧠 Schwächen analysieren → schwache Noten + Score-Map holen
+    try:
+        schwache_noten, score_map = get_weakness(exercise_name, user_id)
+    except Exception as e:
+        print(f"❌ Fehler beim Holen der Schwächen: {e}", flush=True)
+        return
+
+    # 🧪 Abbruch-Kriterium je Level definieren
+    if exercise_name.endswith("_1"):
+        threshold = 15
+    elif exercise_name.endswith("_2"):
+        threshold = 10
+    elif exercise_name.endswith("_3"):
+        threshold = 5
+    else:
+        threshold = 15
+
+    # ⛔ Keine Note ist schlechter als Schwelle → Kurs stoppen
+    if not any(score > threshold for note, score in score_map.items() if note in schwache_noten):
+        print(f"⛔ Keine ausreichend schwachen Noten für {exercise_name} (Level {level}) → Generierung abgebrochen", flush=True)
+        stop_course(exercise_name, user_id)
+        return
+
+    # 🎼 Übung erzeugen basierend auf Score-Wahrscheinlichkeiten
+    uebung = generate_note_sequence_with_rhythm(
+        user_id,
+        weak_notes=schwache_noten,
+        strong_notes=None,
+        exercise_name=exercise_name,
+        score_map=score_map
+    )
+
+    # 🏷️ Namen und Formatierung
+    full_name = f"{exercise_name}_{level}"
+    note_string = " ".join(lilypond_safe(n) for n in uebung)
+    note_inputs = [(full_name, note_string)]
+
+    # 🖼️ PNG generieren
+    for exercise_name, full_sequence_raw in note_inputs:
+        try:
+            url = process_scale(exercise_name, full_sequence_raw, user_id)
+            print(f"✅ {exercise_name} → {url}")
+        except Exception as e:
+            print(f"❌ Fehler bei {exercise_name}: {e}")
+
+
+def get_weakness(exercise_name, user_id):
+    import json
+
+    # 🎚 Schwellenwert je Level
+    if exercise_name.endswith("_1"):
+        min_score = 10
+    elif exercise_name.endswith("_2"):
+        min_score = 5
+    elif exercise_name.endswith("_3"):
+        min_score = -1  # keine Grenze
+    else:
+        min_score = 10
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT intonation_stats FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        raw = row[0] if row else {}
+
+        stats = {}
+        if isinstance(raw, str):
+            try:
+                stats = json.loads(raw)
+            except json.JSONDecodeError:
+                print("⚠️ JSON-Fehler bei intonation_stats", flush=True)
+                return [], {}
+        elif isinstance(raw, dict):
+            stats = raw
+        else:
+            print("⚠️ Unbekanntes Format für intonation_stats", flush=True)
+            return [], {}
+
+        note_scores = stats.get(exercise_name, {})
+        if not isinstance(note_scores, dict):
+            print("⚠️ Ungültiges Format in intonation_stats", flush=True)
+            return [], {}
+
+        if min_score < 0:
+            result_notes = list(note_scores.keys())
+        else:
+            result_notes = [note for note, score in note_scores.items() if score >= min_score]
+
+        print(f"🧪 Notenauswahl für {exercise_name}: {result_notes}", flush=True)
+        return result_notes, note_scores
+
+    except Exception as e:
+        print(f"❌ Fehler in get_weakness: {e}", flush=True)
+        return [], {}
+
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def stop_course(exercise_name, user_id):
+    from flask_socketio import emit
+
+    print(f"📴 Kurs gestoppt: {exercise_name} (User {user_id})", flush=True)
+
+    # 🛰 SocketIO-Nachricht an Client senden
+    socketio.emit(
+        "test_course",
+        {"exercise": exercise_name},
+        to=str(user_id)
+    )
+
+
+def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list[str] = None, exercise_name: str = "", score_map: dict[str, int] = None, user_id: int = None) -> list[str]:
+
+    """
+    Generiert eine musikalisch sinnvolle Übung mit 1 oder 2 vollen Takten (je 8 Achtelwerte).
+    Keine zwei identischen Noten direkt hintereinander erlaubt.
+    Kursabhängige Regeln werden beachtet.
+    """
+    import random
+
+    if strong_notes is None:
+        strong_notes = ["c'", "d'", "e'", "f'", "g'", "a'", "b'", "c''", "d''", "e''", "f''", "g''", "a''"]
+
+    total_eighths_per_bar = 8
+    total_bars = 2
+
+    # 💡 Kursabhängiger Bereich & Dauer
+    if exercise_name.startswith("course_low_register_1"):
+        allowed_range = ["g", "a", "b", "c'", "d'"]
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 4  # max Terz
+
+    elif exercise_name.startswith("course_low_register_2"):
+        allowed_range = ["e", "f", "g", "a", "b", "c'", "d'"]
+        allowed_durations = [
+            ("1", 8), ("2", 4), ("2.", 6), ("4", 2),
+            ("8", 1), ("16", 0.5),
+            ("\\tuplet 3/2 { NOTE8 NOTE8 NOTE8 }", 2)
+        ]
+        max_interval = 7  # max Quinte
+
+    elif exercise_name.startswith("course_low_register_3"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'"]
+        allowed_durations = None
+        max_interval = None
+
+    elif exercise_name.startswith("course_middle_register_1"):
+        allowed_range = ["c'",  "d", "e'", "f'", "g'", "a'"]
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 4  # max Terz
+
+    elif exercise_name.startswith("course_middle_register_2"):
+        allowed_range = ["c'",  "d", "e'", "f'", "g'", "a'", "b'", "c''", "d''"]
+        allowed_durations = [
+            ("1", 8), ("2", 4), ("2.", 6), ("4", 2),
+             ("8", 1), ("16", 0.5),
+            ("\\tuplet 3/2 { NOTE8 NOTE8 NOTE8 }", 2)
+        ]
+        max_interval = 7  # max Terz
+
+
+    elif exercise_name.startswith("course_middle_register_3"):
+        allowed_range = ["c'", "cis'", "des'", "d", "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''"]
+        allowed_durations = None
+        max_interval = None
+        min_interval = 4  # mindestens Terz (inklusive)
+
+    elif exercise_name.startswith("course_highnotes_1"):
+        allowed_range = ["g''", "a''", "b''", "c''", "d''"]
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 4  # max Terz
+
+    elif exercise_name.startswith("course_highnotes_2"):
+        allowed_range = ["g''", "a''", "b''", "c'''", "d'''", "e'''", "f'''"]
+        allowed_durations = [
+            ("1", 8), ("2", 4), ("2.", 6), ("4", 2),
+            ("8", 1), ("16", 0.5),
+            ("\\tuplet 3/2 { NOTE8 NOTE8 NOTE8 }", 2)
+        ]
+        max_interval = 7
+        min_interval = None  # mindestens Terz (inklusive)
+
+    elif exercise_name.startswith("course_highnotes_3"):
+        allowed_range = ["g''", "gis''", "aes''", "a''", "aes''", "bes''", "b''", "c'''", "cis'''", "des'''", "d'''", "dis''", "ees'''",
+                         "e'''", "f'''", "fis'''", "ges'''", "g'''", "gis'''", "aes'''", "a'''"]
+        allowed_durations = None
+        max_interval = 12
+        min_interval = None
+
+    elif exercise_name.startswith("course_intonation_1"):
+        allowed_range = ["g", "a", "b", "c'", "d'", "e'", "f'", "g'", "a'", "b'", "c''"]
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 4
+        min_interval = None
+
+    elif exercise_name.startswith("course_intonation_2"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d", "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''", "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 4
+        min_interval = 3
+
+    elif exercise_name.startswith("course_intonation_3"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 12
+        min_interval = None
+
+    elif exercise_name.startswith("course_tone_1"):
+        allowed_range = ["e", "f", "g", "a", "b", "c'", "d'", "e'", "f'", "g'", "a'", "b'", "c''"]
+        allowed_durations = [("2", 4), ("4", 2)]
+        max_interval = 2
+        min_interval = None
+
+    elif exercise_name.startswith("course_tone_2"):
+        allowed_range = ["c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+
+        allowed_durations = [("2", 4), ("4", 2)]
+        max_interval = 2
+        min_interval = None
+
+    elif exercise_name.startswith("course_tone_3"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+
+        allowed_durations = [("2", 4), ("4", 2)]
+        max_interval = 7
+        min_interval = None
+
+    elif exercise_name.startswith("course_connections_1"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'"]
+
+        allowed_durations = [("1", 8), ("2", 4), ("4", 2)]
+        max_interval = 7
+        min_interval = 3
+
+
+
+    elif exercise_name.startswith("course_connections_2"):
+
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+
+        allowed_durations = [("4", 2)]  # ➕ Das hat gefehlt!
+
+        max_interval = 7
+
+        min_interval = 7
+
+
+    elif exercise_name.startswith("course_connections_3"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+        allowed_durations = [("1", 8), ("2", 4), ("2.", 6), ("4", 2)]
+        max_interval = 12
+        min_interval = 12
+
+    elif exercise_name.startswith("course_finger_1"):
+        allowed_range = ["e", "f", "fis", "g", "gis", "a", "ais", "b", "c'", "cis'", "d'", "dis'", "e'", "f'", "fis'",
+                         "g'"]
+
+    elif exercise_name.startswith("course_finger_2"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+        allowed_durations = [("16", 0.5)]
+        max_interval = None
+        min_interval = None
+
+    elif exercise_name.startswith("course_finger_3"):
+        allowed_range = ["e", "fis", "f", "ges", "g", "gis", "aes", "a", "ais", "bes", "b", "c'", "cis'", "des'", "d",
+                         "dis'", "es'", "e'", "f'", "fis'", "ges'", "g'", "gis'", "aes'",
+                         "a'", "ais'", "bes'", "c''", "cis''", "des''", "d''", "dis''", "es''", "e''", "f''", "fis''",
+                         "ges''", "g''", "gis''", "aes''", "a''", "ais''", "bes''", "b''", "c'''"]
+        allowed_durations = [("16", 0.5)]
+        max_interval = None
+        min_interval = None
+
+    else:
+
+        allowed_range = ["e", "f", "g", "a", "b", "c'", "d'", "e'", "f'", "g'", "a'", "b'", "c''", "d''", "e''", "f''",
+                         "g''", "a''"]
+        allowed_durations = None
+        max_interval = None
+        min_interval = None
+
+
+    def lilypond_safe(note: str) -> str:
+        return note.strip().replace("♯", "is").replace("♭", "es")
+
+    def pitch_to_midi(note: str) -> int:
+        mapping = {
+            "c": 60, "cis": 61, "des": 61, "d": 62, "dis": 63, "ees": 63, "es": 63,
+            "e": 64, "f": 65, "fis": 66, "ges": 66, "g": 67, "gis": 68, "aes": 68,
+            "a": 69, "ais": 70, "bes": 70, "b": 71,
+        }
+        base = note.replace("'", "")
+        octave = note.count("'")
+        return mapping.get(base, 60) + octave * 12
+
+
+    def extract_pitch(note: str) -> str:
+        return note.replace("16", "").replace("8", "").replace("4", "").replace("2", "").replace("1", "").replace(".", "").replace("\\tuplet 3/2 {", "").replace("}", "").strip()
+
+    if score_map:
+        weighted_weak_notes = []
+        for n in allowed_range:
+            score = score_map.get(n, 0)
+            if score > 0:
+                weighted_weak_notes.extend([n] * score)
+        if not weighted_weak_notes:
+            weighted_weak_notes = list(allowed_range)
+    else:
+        weighted_weak_notes = list(weak_notes)
+
+    def choose_note(prio_weak=True) -> str:
+        attempts = 0
+        while attempts < 50:
+            if prio_weak and weighted_weak_notes and random.random() < 0.7:
+                raw = random.choice(weighted_weak_notes)
+            else:
+                raw = random.choice(strong_notes)
+            clean = lilypond_safe(raw)
+            if clean in allowed_range:
+                return clean
+            attempts += 1
+        return random.choice(allowed_range)
+
+
+    if allowed_durations is not None:
+        patterns = []
+
+        for dur, val in allowed_durations:
+            if "tuplet" in dur:
+                def make(v=val):
+                    n1 = choose_note()
+                    n2 = choose_note(False)
+                    n3 = choose_note()
+                    return [f"\\tuplet 3/2 {{ {n1}8 {n2}8 {n3}8 }}"], v
+                patterns.append(make)
+            else:
+                def make(d=dur, v=val):
+                    return [choose_note() + d], v
+                patterns.append(make)
+    else:
+        patterns = [
+            lambda: ([choose_note() + "8", choose_note(False) + "8"], 2),
+            lambda: ([f"\\tuplet 3/2 {{ {choose_note()}8 {choose_note(False)}8 {choose_note()}8 }}"], 3),
+            lambda: ([choose_note() + "4"], 2),
+            lambda: ([choose_note() + "8.", choose_note(False) + "16"], 2),
+            lambda: ([choose_note() + "2"], 4),
+            lambda: ([choose_note() + "4", choose_note(False) + "4"], 4),
+            lambda: ([choose_note() + "1"], 8),
+        ]
+
+    full_sequence = []
+    full_sequence_raw = []
+    full_sequence_durations = []
+
+    if exercise_name.startswith("course_finger_1"):
+        full_sequence = []
+        direction = random.choice(["up", "down"])
+        base_note = choose_note()
+
+        def shift_by_intervals(base: str, intervals: list[int]) -> list[str]:
+            try:
+                base_midi = pitch_to_midi(base)
+                seq = [base_midi]
+                for iv in intervals:
+                    seq.append(seq[-1] + iv)
+                return [n for n in [note for note in allowed_range if pitch_to_midi(note) in seq] for _ in [0]]
+            except:
+                return []
+
+        if direction == "up":
+            intervals = [4, 3, 4, 3, -14]  # Gesamtbewegung: +14 (zurück zur Oktave tiefer)
+        else:
+            intervals = [-3, -4, -3, -4, +14]
+
+        # Erzeuge Sequenz
+        note_names = shift_by_intervals(base_note, intervals)
+        if len(note_names) != 6:
+            print("⚠️ Ungültige Folge – versuche erneut")
+            return generate_note_sequence_with_rhythm(weak_notes, strong_notes, exercise_name, score_map, user_id)
+
+        # z. B. 6 Noten je Viertel
+        full_sequence = [note + "4" for note in note_names]
+
+        return full_sequence
+
+    intervals_up = [4, -2, 3, -1, 3, -2, 4, -2, 4, -2, 3, 4, -2, 3, -1, 3, -2, 4, -2, 4, -2, 3]
+    intervals_down = [-3, 2, -4, 2, -4, 2, -1, 1, -3, 2, -4, -3, 2, -4, 2, -4, 2, -1, 1, -3, 2, -4]
+
+    if exercise_name.startswith("course_finger_2"):
+        full_sequence = []
+        direction = random.choice(["up", "down"])
+        base_note = choose_note()
+
+        def shift_sequence(base: str, intervals: list[int]) -> list[str]:
+            try:
+                base_midi = pitch_to_midi(base)
+                seq = [base_midi]
+                for iv in intervals:
+                    seq.append(seq[-1] + iv)
+                # Nur erlaubte Noten
+                return [n for n in [note for note in allowed_range if pitch_to_midi(note) in seq]]
+            except:
+                return []
+
+        intervals = intervals_up if direction == "up" else intervals_down
+        note_names = shift_sequence(base_note, intervals)
+
+        if len(note_names) != len(intervals) + 1:
+            print("⚠️ Ungültige Folge – versuche erneut")
+            return generate_note_sequence_with_rhythm(weak_notes, strong_notes, exercise_name, score_map, user_id)
+
+        # z. B. durchgehend Achtelnoten
+        full_sequence = [note + "16" for note in note_names]
+        return full_sequence
+
+    if exercise_name.startswith("course_finger_3"):
+        def get_note_sequence_from_intervals(start_note: str, intervals: list[int]) -> list[str]:
+            sequence = [start_note]
+            current_midi = pitch_to_midi(start_note)
+            for step in intervals:
+                current_midi += step
+                candidates = [n for n in allowed_range if pitch_to_midi(n) == current_midi]
+                if not candidates:
+                    return []
+                sequence.append(candidates[0])
+            return sequence
+
+        # 🎯 Alle definierten Abläufe (jeweils: (aufwärts, abwärts))
+        all_patterns = [
+            (
+                [2, 2, 1, -3, 2, 1, 2, -3, 1, 2, 2, -4, 2, 2, 2, -4, 2, 2, 1, -3, 2, 1, 2, -3, 1, 2, 2, -4],
+                [-1, -2, -2, 4, -2, -2, -2, 4, -2, -2, -1, 3, -2, -1, -2, 3, -1, -2, -2, 4, -2, -2, -1, 1],
+            ),
+            (
+                [4, 3, 3, 2, 4, 3, 3, 2],
+                [-2, -3, -3, -4, -2, -3, -3, -4],
+            ),
+        ]
+
+        # 🔁 Auswahl eines zufälligen Musters
+        direction = random.choice(["up", "down"])
+        pattern = random.choice(all_patterns)
+        intervals = pattern[0] if direction == "up" else pattern[1]
+
+        # 🔁 Wiederhole für `total_bars`
+        full_sequence = []
+        for _ in range(total_bars):
+            root_note = choose_note()
+            note_names = get_note_sequence_from_intervals(root_note, intervals)
+            if not note_names:
+                continue
+            full_sequence.extend([n + "16" for n in note_names])
+
+        return full_sequence
+
+    if exercise_name.startswith("course_connections_2"):
+        # 🎯 Spezielle Sequenz: Grundton–Quinte–Wechsel
+        # Wir nehmen zufällige Grundtöne und wechseln zur Quinte
+        def get_quinte(note: str) -> str:
+            try:
+                base_midi = pitch_to_midi(note)
+                quinte_midi = base_midi + 7
+                candidates = [n for n in allowed_range if pitch_to_midi(n) == quinte_midi]
+                return candidates[0] if candidates else None
+            except:
+                return None
+
+        for _ in range(total_bars):
+            takt = []
+            used = 0
+            while used < total_eighths_per_bar:
+                grundton = choose_note()
+                quinte = get_quinte(grundton)
+                if not quinte:
+                    continue  # finde anderen Grundton
+                # Verwende immer Viertelnoten für Gleichverteilung
+                takt.append(grundton + "4")
+                takt.append(quinte + "4")
+                used += 4  # 2 Viertel = 4 Achtel
+            full_sequence.extend(takt)
+        return full_sequence
+
+    for _ in range(total_bars):
+        takt = []
+        used = 0
+        attempt = 0
+
+        while used < total_eighths_per_bar and attempt < 200:
+            notes, dur = random.choice(patterns)()
+
+            if used + dur > total_eighths_per_bar:
+                attempt += 1
+                continue
+
+            last_note = extract_pitch((takt + full_sequence)[-1]) if (takt or full_sequence) else None
+            first_note = extract_pitch(notes[0])
+
+            if last_note and first_note == last_note:
+                attempt += 1
+                continue
+
+            if not all(extract_pitch(n) in allowed_range for n in notes):
+                attempt += 1
+                continue
+
+            # ➕ Intervallregel (nur bei bestimmten Kursen aktiv)
+            if last_note:
+                try:
+                    midi1 = pitch_to_midi(last_note)
+                    midi2 = pitch_to_midi(first_note)
+
+                    if max_interval is not None or min_interval is not None or exercise_name.startswith(
+                            "course_highnotes_3") or exercise_name.startswith("course_intonation_3"):
+                        try:
+                            midi1 = pitch_to_midi(last_note)
+                            midi2 = pitch_to_midi(first_note)
+                            interval = abs(midi2 - midi1)
+
+                            # 🎯 Spezieller Fall: course_highnotes_3
+                            if exercise_name.startswith("course_highnotes_3"):
+                                if interval > 12:
+                                    attempt += 1
+                                    continue
+                                # Bevorzuge Terz–Quintintervall
+                                if not (3 <= interval <= 7) and random.random() < 0.7:
+                                    attempt += 1
+                                    continue
+
+                            # 🎯 Neuer Fall: course_intonation_3
+                            elif exercise_name.startswith("course_intonation_3"):
+                                if interval > 12:
+                                    attempt += 1
+                                    continue
+                                # Bevorzuge ebenfalls Terz–Quinte
+                                if not (3 <= interval <= 7) and random.random() < 0.7:
+                                    attempt += 1
+                                    continue
+
+                            # 🎯 Standardfall für min/max
+                            else:
+                                if max_interval is not None and interval > max_interval:
+                                    attempt += 1
+                                    continue
+                                if min_interval is not None and interval < min_interval:
+                                    attempt += 1
+                                    continue
+
+                        except Exception:
+                            attempt += 1
+                            continue
+
+                        except Exception:
+                            attempt += 1
+                            continue
+
+                    if min_interval is not None and abs(midi2 - midi1) < min_interval:
+                        attempt += 1
+                        continue
+
+                except Exception:
+                    attempt += 1
+                    continue
+
+            # ⚠️ Wiederholung z. B. auf Positionen 1/3 oder 2/4 vermeiden
+            flattened = takt + full_sequence
+            prev_notes = [extract_pitch(n) for n in flattened]
+
+            check_indices = [len(prev_notes) + i for i in range(len(notes))]
+
+            repetitive = False
+            for i, idx in enumerate(check_indices):
+                if idx >= 2 and idx - 2 < len(prev_notes):
+                    if extract_pitch(notes[i]) == prev_notes[idx - 2]:
+                        repetitive = True
+                        break
+
+            # ⛔ Wenn Wiederholung erkannt & andere Optionen vorhanden → skip mit Wahrscheinlichkeit
+            if repetitive and random.random() < 0.8:
+                attempt += 1
+                continue
+
+            takt.extend(notes)
+            for n in notes:
+                full_sequence_raw.append(extract_pitch(n))  # z. B. "g'" aus "g'8"
+                full_sequence_durations.append(dur / len(notes))  # z. B. bei Tuplet = 3 Noten mit je 0.666
+
+            used += dur
+
+        if used != total_eighths_per_bar:
+            print("⚠️ Takt nicht exakt gefüllt, wiederhole...")
+            return generate_note_sequence_with_rhythm(weak_notes, strong_notes, exercise_name, score_map, user_id)
+
+        full_sequence.extend(takt)
+
+    if user_id is not None:
+        process_scale(full_sequence_raw, exercise_name, user_id)
+
+    # ✅ Immer am Ende: Abschlussnoten
+    full_sequence.append("e,1")
+    full_sequence.append("a'''1")
+
+    return full_sequence
+
+
+def lilypond_safe(note: str) -> str:
+    return (
+        note.replace("♯", "is")
+            .replace("♭", "es")
+            .replace("𝄪", "isis")  # optional
+            .replace("𝄫", "eses")  # optional
+    )
+
+
+def process_scale(exercise_name, full_sequence_raw, user_id):
+    note_list = full_sequence_raw.split()
+    note_list = note_list[:-2]  # 🚫 Letzte 2 Noten entfernen
+    # Taktart aus LilyPond-Code extrahieren oder festlegen
+    time_signature_str = "4/4"  # falls du es später dynamisch machen willst, extrahiere es aus notes oder gib es mit
+    time_signature_map = {
+        "2/4": 2,
+        "3/4": 3,
+        "4/4": 4,
+        "6/8": 6
+    }
+    time_signature = time_signature_map.get(time_signature_str, 4)  # Default = 4
+
+    note_count = len(note_list)
+    note_width_mm = 24
+    padding_mm = 40
+    total_width = note_count * note_width_mm + padding_mm
+    dpi = 600
+
+    tmp = Path("/tmp")
+    output_png_path = tmp / f"{exercise_name}.png"
+    temp_png_path = tmp / "temp_output.png"
+    cropped_png_path = tmp / "cropped_output.png"
+
+    #note_crop_width_px = int((cut_notes * note_width_mm + cut_padding_mm) * dpi / 15.4)
+
+    ly_code = f"""
+    \\version "2.24.2"
+    #(set-global-staff-size 36)
+    \\paper {{
+      indent = 0
+      line-width = {total_width}\\mm
+      ragged-right = ##t
+      paper-width = {total_width}\\mm
+      paper-height = 180\\mm
+      tagline = ##f
+    }}
+
+    \\layout {{
+      \\context {{
+        \\Score
+        \\remove "Bar_number_engraver"
+      }}
+    }}
+
+    \\score {{
+      \\new Staff {{
+        \\clef treble
+        \\key c \\major
+        \\time 4/4
+
+        {full_sequence_raw}
+      }}
+    }}
+    """
+
+    ly_code = ly_code.replace('\\version "2.24.2"', '\\version "2.24.1"')
+
+    ly_file = Path("/tmp/notation.ly")
+    pdf_file = ly_file.with_suffix(".pdf")
+    ly_file.write_text(ly_code)
+
+    subprocess.run(["lilypond", "-o", str(ly_file.with_suffix("")), str(ly_file)], check=True)
+
+    subprocess.run([
+        "convert", "-density", str(dpi), "-background", "none", "-alpha", "on",
+        str(pdf_file), str(temp_png_path)
+    ], check=True)
+
+    subprocess.run([
+        "convert", str(temp_png_path),
+        "-trim", "-bordercolor", "none", "-border", "20",
+        str(output_png_path)
+    ], check=True)
+
+    img = Image.open(output_png_path)
+    width, height = img.size
+
+    temp_png_path.unlink(missing_ok=True)
+
+    print(f"✅ PNG fertig: {output_png_path}")
+    upload_path = f"media/exercises/{user_id}/{exercise_name}.png"
+    with open(output_png_path, "rb") as f:
+            supabase.storage.from_("audiofiles").upload(
+                f"{upload_path}?upsert=true",
+                f,
+                {"content-type": "image/png"}
+        )
+    print(f"🚀 Hochgeladen nach Supabase: {upload_path}")
+
+    accidental_positions = []
+    accidental_types = []
+    accidental_count = 0
+    durations = []
+    frequencies = []
+    note_regex = re.compile(r"([a-g][eis]*[,']*)(\d+\.*)")
+
+    NOTE_FREQUENCIES = {
+        # Subsubkontra-Oktave
+        "c,,": 29.14, "cis,,": 30.96, "des,,": 30.96, "d,,": 32.70, "dis,,": 34.65, "es,,": 34.65,
+        "e,,": 36.71, "f,,": 38.89, "fis,,": 41.20, "ges,,": 41.20, "g,,": 43.65,
+        "gis,,": 46.25, "as,,": 46.25, "a,,": 49.00, "ais,,": 51.91, "bes,,": 51.91, "b,,": 55.00,
+
+        # Subkontra-Oktave
+        "c,": 58.27, "cis,": 61.74, "des,": 61.74, "d,": 65.41, "dis,": 69.30, "es,": 69.30,
+        "e,": 73.42, "f,": 77.78, "fis,": 82.41, "ges,": 82.41, "g,": 87.31,
+        "gis,": 92.50, "as,": 92.50, "a,": 98.00, "ais,": 103.83, "bes,": 103.83, "b,": 110.00,
+
+        # Kontra-Oktave
+        "c": 116.54, "cis": 123.47, "des": 123.47, "d": 130.81, "dis": 138.59, "es": 138.59,
+        "e": 146.83, "f": 155.56, "fis": 164.81, "ges": 164.81, "g": 174.61,
+        "gis": 185.00, "as": 185.00, "a": 196.00, "ais": 207.65, "bes": 207.65, "b": 220.00,
+
+        # eingestrichene Oktave
+        "c'": 233.08, "cis'": 246.94, "des'": 246.94, "d'": 261.63, "dis'": 277.18, "es'": 277.18,
+        "e'": 293.66, "f'": 311.13, "fis'": 329.63, "ges'": 329.63, "g'": 349.23,
+        "gis'": 369.99, "as'": 369.99, "a'": 392.00, "ais'": 415.30, "bes'": 415.30, "b'": 440.00,
+
+        # zweigestrichene Oktave
+        "c''": 466.16, "cis''": 493.88, "des''": 493.88, "d''": 523.25, "dis''": 554.37, "es''": 554.37,
+        "e''": 587.33, "f''": 622.25, "fis''": 659.25, "ges''": 659.25, "g''": 698.46,
+        "gis''": 739.99, "as''": 739.99, "a''": 783.99, "ais''": 830.61, "bes''": 830.61, "b''": 880.00,
+
+        # dreigestrichene Oktave
+        "c'''": 932.33, "cis'''": 987.77, "des'''": 987.77, "d'''": 1046.50, "dis'''": 1108.73, "es'''": 1108.73,
+        "e'''": 1174.66, "f'''": 1244.51, "fis'''": 1318.51, "ges'''": 1318.51, "g'''": 1396.91,
+        "gis'''": 1479.98, "as'''": 1479.98, "a'''": 1567.98, "ais'''": 1661.22, "bes'''": 1661.22, "b'''": 1760.00,
+    }
+
+    def lilypond_note_to_frequency(note_str: str) -> float:
+        pitch_part = re.match(r"([a-g](is|es)?[,']*)", note_str)
+        if not pitch_part:
+            return 0.0
+
+        note_key = pitch_part.group(1)
+
+
+        if note_key in NOTE_FREQUENCIES:
+            return NOTE_FREQUENCIES[note_key]
+        else:
+            print(f"⚠️  WARNUNG: Note '{note_key}' nicht gefunden!")
+            return 0.0
+
+    for i, token in enumerate(note_list):
+        match = note_regex.match(token)
+        if not match:
+            continue
+        note, dur = match.groups()
+
+        # ♯/♭-Logik
+        # ♯/♭-Typ erkennen: 0 = ♭, 1 = natürlich, 2 = ♯
+        note_base = re.match(r"([a-g])(is|es)?", note)
+        if note_base:
+            base, acc = note_base.groups()
+            if acc == "es":
+                accidental_positions.append(str(i))
+                accidental_types.append("0")
+                accidental_count += 1
+            elif acc == "is":
+                accidental_positions.append(str(i))
+                accidental_types.append("2")
+                accidental_count += 1
+            else:
+                accidental_types.append("1")
+
+            # Keine Position, kein Count für natürliche Noten
+
+            # ⚠️ Normale Noten NICHT zum accidental_count zählen!
+
+        # 🎵 Rhythmus-Wert berechnen (inkl. Punktierungen)
+        # 🎵 Rhythmus-Wert berechnen (inkl. Punktierungen)
+        # 🎵 Rhythmus-Wert strikt zuweisen
+        duration_map = {
+            "1": 1,
+            "2": 2,
+            "2.": 1.5,
+            "4": 4,
+            "4.": 3.5,
+            "8": 8,
+            "8.": 7.5,
+            "16": 16
+        }
+
+        dur_clean = dur.strip() if dur else "4"
+        duration_float = duration_map.get(dur_clean, 1.0)
+        durations.append(str(duration_float))
+
+        # 🎼 Frequenz
+        freq = lilypond_note_to_frequency(note)
+        frequencies.append(f"{round(freq, 2)}")
+
+    existing_ids = [row['id'] for row in supabase.table("reference_exercises").select("id").execute().data]
+    new_id = next(i for i in range(10000) if i not in existing_ids)
+
+    data = {
+        "id": new_id,
+        "name": exercise_name,
+        "created_at": datetime.utcnow().isoformat(),
+        "note_count": note_count,
+        "accidentals_count": accidental_count,
+        "accidentals_position": accidental_positions,
+        "freq": frequencies,
+        "user_id": 0,
+        "durations": durations,
+        "accidental_types": accidental_types,
+        "time_signature": time_signature,
+
+    }
+
+    res = supabase.table("reference_exercises").insert(data).execute()
+    print(f"🧠 Datenbankeintrag erstellt mit ID {new_id}")
+
 
 if __name__ == "__main__":
     import os
