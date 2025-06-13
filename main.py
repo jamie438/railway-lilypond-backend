@@ -545,7 +545,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-@app.route("/level_exercises", methods=["POST"])
+@app.route("/level_exercises_generate", methods=["POST"])
 def update_level_exercises():
     logger.debug("---- POST /level_exercises gestartet ----")
     try:
@@ -670,12 +670,8 @@ def generate_exercise_png(exercise_name: str, level: int, user_id: int):
     # ------------------------------------------------------------
     full_name    = f"{exercise_name}_{level}"
     note_string  = " ".join(lilypond_safe(n) for n in uebung)
-    try:
-        url = process_scale(full_name, note_string, user_id)
-        logger.info("✅ PNG fertig: %s  →  %s", full_name, url)
-    except Exception as e:
-        logger.exception("❌ Fehler bei process_scale(%s): %s", full_name, e)
-
+    print(full_name)
+    print(note_string)
 # --------------------------------------------------------------------
 # 3.  Schwächen-Analyse  ---------------------------------------------
 # --------------------------------------------------------------------
@@ -1268,7 +1264,7 @@ def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list
         process_scale(final_name, note_string, user_id)
 
     # ✅ Immer am Ende: Abschlussnoten
-    full_sequence.append("e,1")
+    full_sequence.append("e1")
     full_sequence.append("a'''1")
 
     return full_sequence
