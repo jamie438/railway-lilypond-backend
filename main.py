@@ -651,7 +651,7 @@ def generate_exercise_png(exercise_name: str, level: int, user_id: int):
         logger.info("⛔ Keine ausreichend schwachen Noten → Kurs stoppen")
         stop_course(exercise_name, user_id)
         return
-
+    new_level = level + 1
     # ------------------------------------------------------------
     # 2.4 Übung erzeugen
     # ------------------------------------------------------------
@@ -660,7 +660,8 @@ def generate_exercise_png(exercise_name: str, level: int, user_id: int):
         weak_notes     = schwache_noten,
         strong_notes   = None,
         exercise_name  = exercise_name,
-        score_map      = score_map
+        score_map      = score_map,
+        level          = new_level
     )
     logger.debug("Erzeugte Notenfolge: %s", uebung)
 
@@ -756,7 +757,7 @@ def stop_course(exercise_name, user_id):
         logger.exception("❌ Fehler beim Senden von SocketIO-Event: %s", e)
 
 
-def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list[str] = None, exercise_name: str = "", score_map: dict[str, int] = None, user_id: int = None) -> list[str]:
+def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list[str] = None, exercise_name: str = "", score_map: dict[str, int] = None, user_id: int = None, level: int = None) -> list[str]:
 
     """
     Generiert eine musikalisch sinnvolle Übung mit 1 oder 2 vollen Takten (je 8 Achtelwerte).
@@ -1261,8 +1262,10 @@ def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list
 
         full_sequence.extend(takt)
 
-    if user_id is not None:
-        process_scale(full_sequence_raw, exercise_name, user_id)
+    if user_id is not None and level is not None:
+        note_string = " ".join(lilypond_safe(n) for n in full_sequence)
+        final_name = f"{exercise_name}_{user_id}_{level}"
+        process_scale(final_name, note_string, user_id)
 
     # ✅ Immer am Ende: Abschlussnoten
     full_sequence.append("e,1")
@@ -1280,7 +1283,7 @@ def lilypond_safe(note: str) -> str:
     )
 
 
-def process_scale(exercise_name, full_sequence_raw, user_id):
+def process_scale(exercise_name: str, full_sequence_raw: str, user_id: int):
     note_list = full_sequence_raw.split()
     note_list = note_list[:-2]  # 🚫 Letzte 2 Noten entfernen
     # Taktart aus LilyPond-Code extrahieren oder festlegen
