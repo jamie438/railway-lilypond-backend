@@ -15,7 +15,7 @@ import tempfile
 import requests
 from datetime import date, datetime
 from psycopg2.extras import json
-
+import logging
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
@@ -535,50 +535,94 @@ def scan_file_with_clamav(file) -> bool:
                 return True  # <- Ja, erlauben!
             return False
 
+logging.basicConfig(
+    level=logging.DEBUG,  # DEBUG-Ausgaben direkt sehen
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
 
 @app.route("/level_exercises", methods=["POST"])
 def update_level_exercises():
+    logger.debug("---- POST /level_exercises gestartet ----")
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
+        logger.debug("Raw JSON: %s", data)
+
         if not data:
+            logger.warning("❌ Keine Daten empfangen")
             return jsonify({"error": "Keine Daten empfangen"}), 400
 
         level_exercises = data.get("level_exercises")
-        user_id = data.get("user_id")
+        user_id         = data.get("user_id")
+        logger.debug("user_id=%s   level_exercises=%s", user_id, level_exercises)
+
         if level_exercises is None or user_id is None:
-            return jsonify({"error": "level_exercises und user_id müssen angegeben werden."}), 400
+            logger.warning("❌ level_exercises oder user_id fehlt")
+            return jsonify(
+                {"error": "level_exercises und user_id müssen angegeben werden."}
+            ), 400
 
+        # ------------------------------------------------------------
+        # 1.1 In DB speichern
+        # ------------------------------------------------------------
         level_exercises_str = json.dumps(level_exercises)
-
         conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET level_exercises = %s WHERE id = %s", (level_exercises_str, user_id))
+        cur  = conn.cursor()
+        logger.debug("SQL-Update users.level_exercises ← %s", level_exercises_str)
+        cur.execute(
+            "UPDATE users SET level_exercises = %s WHERE id = %s",
+            (level_exercises_str, user_id)
+        )
         conn.commit()
         conn.close()
+        logger.debug("✅ Level-Map in DB gespeichert")
 
-        # ✅ Neue PNGs generieren
+        # ------------------------------------------------------------
+        # 1.2 PNGs generieren
+        # ------------------------------------------------------------
         for exercise_name, level in level_exercises.items():
+            logger.debug("➡️   generate_exercise_png('%s', %s, %s)",
+                         exercise_name, level, user_id)
             try:
                 generate_exercise_png(exercise_name, level, user_id)
             except Exception as gen_err:
-                print(f"⚠️ Fehler beim Generieren von PNG für {exercise_name} (Level {level}):", gen_err)
+                logger.exception(
+                    "⚠️ Fehler beim Generieren PNG (%s, Level %s): %s",
+                    exercise_name, level, gen_err
+                )
 
+        logger.debug("---- POST /level_exercises fertig ----")
         return jsonify({"message": "Level exercises erfolgreich aktualisiert"}), 200
 
     except Exception as e:
-        print("❌ Fehler beim Aktualisieren der level exercises:", e)
+        logger.exception("❌ Unerwarteter Fehler in update_level_exercises: %s", e)
         return jsonify({"error": "Fehler beim Aktualisieren der level exercises"}), 500
 
-
+# --------------------------------------------------------------------
+# 2.  PNG-Generator  --------------------------------------------------
+# --------------------------------------------------------------------
 def generate_exercise_png(exercise_name: str, level: int, user_id: int):
-    # 🧠 Schwächen analysieren → schwache Noten + Score-Map holen
+    logger.debug("---- generate_exercise_png('%s', %s, %s) ----",
+                 exercise_name, level, user_id)
+
+    # ------------------------------------------------------------
+    # 2.1 Schwächen herausfinden
+    # ------------------------------------------------------------
     try:
         schwache_noten, score_map = get_weakness(exercise_name, user_id)
+        logger.debug("schwache_noten=%s", schwache_noten)
+        logger.debug("score_map=%s", score_map)
     except Exception as e:
-        print(f"❌ Fehler beim Holen der Schwächen: {e}", flush=True)
+        logger.exception("❌ Fehler in get_weakness: %s", e)
         return
 
-    # 🧪 Abbruch-Kriterium je Level definieren
+    # ------------------------------------------------------------
+    # 2.2 Threshold pro Level
+    # ------------------------------------------------------------
     if exercise_name.endswith("_1"):
         threshold = 15
     elif exercise_name.endswith("_2"):
@@ -587,106 +631,116 @@ def generate_exercise_png(exercise_name: str, level: int, user_id: int):
         threshold = 5
     else:
         threshold = 15
+    logger.debug("threshold=%s", threshold)
 
-    # ⛔ Keine Note ist schlechter als Schwelle → Kurs stoppen
-    if not any(score > threshold for note, score in score_map.items() if note in schwache_noten):
-        print(f"⛔ Keine ausreichend schwachen Noten für {exercise_name} (Level {level}) → Generierung abgebrochen", flush=True)
+    # ------------------------------------------------------------
+    # 2.3 Abbruch-Kriterium
+    # ------------------------------------------------------------
+    if not any(score > threshold
+               for note, score in score_map.items() if note in schwache_noten):
+        logger.info("⛔ Keine ausreichend schwachen Noten → Kurs stoppen")
         stop_course(exercise_name, user_id)
         return
 
-    # 🎼 Übung erzeugen basierend auf Score-Wahrscheinlichkeiten
+    # ------------------------------------------------------------
+    # 2.4 Übung erzeugen
+    # ------------------------------------------------------------
     uebung = generate_note_sequence_with_rhythm(
-        user_id,
-        weak_notes=schwache_noten,
-        strong_notes=None,
-        exercise_name=exercise_name,
-        score_map=score_map
+        user_id        = user_id,
+        weak_notes     = schwache_noten,
+        strong_notes   = None,
+        exercise_name  = exercise_name,
+        score_map      = score_map
     )
+    logger.debug("Erzeugte Notenfolge: %s", uebung)
 
-    # 🏷️ Namen und Formatierung
-    full_name = f"{exercise_name}_{level}"
-    note_string = " ".join(lilypond_safe(n) for n in uebung)
-    note_inputs = [(full_name, note_string)]
+    # ------------------------------------------------------------
+    # 2.5 PNG rendern
+    # ------------------------------------------------------------
+    full_name    = f"{exercise_name}_{level}"
+    note_string  = " ".join(lilypond_safe(n) for n in uebung)
+    try:
+        url = process_scale(full_name, note_string, user_id)
+        logger.info("✅ PNG fertig: %s  →  %s", full_name, url)
+    except Exception as e:
+        logger.exception("❌ Fehler bei process_scale(%s): %s", full_name, e)
 
-    # 🖼️ PNG generieren
-    for exercise_name, full_sequence_raw in note_inputs:
-        try:
-            url = process_scale(exercise_name, full_sequence_raw, user_id)
-            print(f"✅ {exercise_name} → {url}")
-        except Exception as e:
-            print(f"❌ Fehler bei {exercise_name}: {e}")
-
-
+# --------------------------------------------------------------------
+# 3.  Schwächen-Analyse  ---------------------------------------------
+# --------------------------------------------------------------------
 def get_weakness(exercise_name, user_id):
-    import json
+    logger.debug("---- get_weakness('%s', %s) ----", exercise_name, user_id)
 
-    # 🎚 Schwellenwert je Level
-    if exercise_name.endswith("_1"):
+    # Schwelle je Level-Suffix
+    if exercise_name.endswith("_1_title"):
         min_score = 10
-    elif exercise_name.endswith("_2"):
+    elif exercise_name.endswith("_2_title"):
         min_score = 5
-    elif exercise_name.endswith("_3"):
-        min_score = -1  # keine Grenze
+    elif exercise_name.endswith("_3_title"):
+        min_score = -1
     else:
         min_score = 10
+    logger.debug("min_score=%s", min_score)
 
-    conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute("SELECT intonation_stats FROM users WHERE id = %s", (user_id,))
-        row = cur.fetchone()
-        raw = row[0] if row else {}
+        row  = cur.fetchone()
+        raw  = row[0] if row else {}
+        logger.debug("Raw stats: %s", raw)
 
-        stats = {}
+        # JSON-Parsing
         if isinstance(raw, str):
-            try:
-                stats = json.loads(raw)
-            except json.JSONDecodeError:
-                print("⚠️ JSON-Fehler bei intonation_stats", flush=True)
-                return [], {}
+            stats = json.loads(raw) if raw else {}
         elif isinstance(raw, dict):
             stats = raw
         else:
-            print("⚠️ Unbekanntes Format für intonation_stats", flush=True)
+            logger.warning("⚠️ Unbekanntes Format (intonation_stats)")
             return [], {}
 
-        note_scores = stats.get(exercise_name, {})
-        if not isinstance(note_scores, dict):
-            print("⚠️ Ungültiges Format in intonation_stats", flush=True)
-            return [], {}
+        # Richtiger Key?
+        note_scores = (
+            stats.get(exercise_name) or
+            stats.get(exercise_name.replace("_title", "")) or
+            {}
+        )
+        logger.debug("note_scores=%s", note_scores)
 
+        # Filter schwache Noten
         if min_score < 0:
             result_notes = list(note_scores.keys())
         else:
-            result_notes = [note for note, score in note_scores.items() if score >= min_score]
-
-        print(f"🧪 Notenauswahl für {exercise_name}: {result_notes}", flush=True)
+            result_notes = [
+                n for n, s in note_scores.items() if s >= min_score
+            ]
+        logger.debug("→ schwache Noten: %s", result_notes)
         return result_notes, note_scores
 
     except Exception as e:
-        print(f"❌ Fehler in get_weakness: {e}", flush=True)
+        logger.exception("❌ Fehler in get_weakness: %s", e)
         return [], {}
 
     finally:
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
-
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def stop_course(exercise_name, user_id):
-    from flask_socketio import emit
+    logger.info("📴 Kurs wird gestoppt: %s (User %s)", exercise_name, user_id)
 
-    print(f"📴 Kurs gestoppt: {exercise_name} (User {user_id})", flush=True)
-
-    # 🛰 SocketIO-Nachricht an Client senden
-    socketio.emit(
-        "test_course",
-        {"exercise": exercise_name},
-        to=str(user_id)
-    )
+    try:
+        # 🛰 SocketIO-Nachricht an Client senden
+        logger.debug("→ Sende SocketIO-Event 'test_course' an User %s", user_id)
+        socketio.emit(
+            "test_course",
+            {"exercise": exercise_name},
+            to=str(user_id)
+        )
+        logger.info("✅ SocketIO-Event 'test_course' gesendet an User %s", user_id)
+    except Exception as e:
+        logger.exception("❌ Fehler beim Senden von SocketIO-Event: %s", e)
 
 
 def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list[str] = None, exercise_name: str = "", score_map: dict[str, int] = None, user_id: int = None) -> list[str]:
