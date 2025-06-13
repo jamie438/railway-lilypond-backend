@@ -584,16 +584,26 @@ def update_level_exercises():
         # ------------------------------------------------------------
         # 1.2 PNGs generieren
         # ------------------------------------------------------------
-        for exercise_name, level in level_exercises.items():
-            logger.debug("➡️   generate_exercise_png('%s', %s, %s)",
-                         exercise_name, level, user_id)
-            try:
+        # ------------------------------------------------------------
+        # 1.2 PNGs generieren  (ERSATZ)
+        # ------------------------------------------------------------
+        for key, value in level_exercises.items():
+            # Fall A: value ist INT  →  {exercise_name: level}
+            if isinstance(value, (int, float)):
+                exercise_name = key
+                level = int(value)
+                logger.debug("➡️  PNG-Gen A  %s  Level %s", exercise_name, level)
                 generate_exercise_png(exercise_name, level, user_id)
-            except Exception as gen_err:
-                logger.exception(
-                    "⚠️ Fehler beim Generieren PNG (%s, Level %s): %s",
-                    exercise_name, level, gen_err
-                )
+
+            # Fall B: value ist LIST →  {level: [exercise_name, …]}
+            elif isinstance(value, (list, tuple, set)):
+                level = int(key)
+                for exercise_name in value:
+                    logger.debug("➡️  PNG-Gen B  %s  Level %s", exercise_name, level)
+                    generate_exercise_png(exercise_name, level, user_id)
+
+            else:
+                logger.warning("⚠️  Unerwarteter Datentyp in level_exercises: %s → %s", key, value)
 
         logger.debug("---- POST /level_exercises fertig ----")
         return jsonify({"message": "Level exercises erfolgreich aktualisiert"}), 200
@@ -672,15 +682,18 @@ def get_weakness(exercise_name, user_id):
     logger.debug("---- get_weakness('%s', %s) ----", exercise_name, user_id)
 
     # Schwelle je Level-Suffix
-    if exercise_name.endswith("_1_title"):
+    # ------------------------------------------------------------
+    # 2.2 Threshold pro Level   (ERSATZ)
+    # ------------------------------------------------------------
+    if exercise_name.endswith(("_1", "_1_title")):
+        min_score = 15
+    elif exercise_name.endswith(("_2", "_2_title")):
         min_score = 10
-    elif exercise_name.endswith("_2_title"):
+    elif exercise_name.endswith(("_3", "_3_title")):
         min_score = 5
-    elif exercise_name.endswith("_3_title"):
-        min_score = -1
     else:
-        min_score = 10
-    logger.debug("min_score=%s", min_score)
+        min_score = 15
+    logger.debug("threshold=%s", min_score)
 
     try:
         conn = get_db_connection()
