@@ -545,7 +545,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-@app.route("/level_exercises_generate", methods=["POST"])
+@app.route("/level_exercises", methods=["POST"])
 def update_level_exercises():
     logger.debug("---- POST /level_exercises gestartet ----")
     try:
