@@ -963,12 +963,23 @@ def generate_note_sequence_with_rhythm(weak_notes: list[str], strong_notes: list
     def extract_pitch(note: str) -> str:
         return note.replace("16", "").replace("8", "").replace("4", "").replace("2", "").replace("1", "").replace(".", "").replace("\\tuplet 3/2 {", "").replace("}", "").strip()
 
+    from math import ceil
+
+    def _replications(score: float | int) -> int:
+        """
+        Wandelt einen Score (int oder float) in mindestens 1 ganze Wiederholung um.
+        Float-Scores werden aufgerundet, damit ihr relatives Gewicht erhalten bleibt.
+        """
+        if isinstance(score, float):
+            return max(1, ceil(score))  # 7.37 → 8, 0.4 → 1
+        return max(1, score)
+
     if score_map:
         weighted_weak_notes = []
         for n in allowed_range:
             score = score_map.get(n, 0)
             if score > 0:
-                weighted_weak_notes.extend([n] * score)
+                weighted_weak_notes.extend([n] * _replications(score))
         if not weighted_weak_notes:
             weighted_weak_notes = list(allowed_range)
     else:
